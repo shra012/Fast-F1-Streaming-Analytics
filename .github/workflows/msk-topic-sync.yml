@@ -1,0 +1,63 @@
+name: Sync Kafka Topics
+
+on:
+  push:
+    paths:
+      - "kafka/topics.yaml"
+  pull_request:
+    paths:
+      - "kafka/topics.yaml"
+  workflow_dispatch:
+    inputs:
+      topics_file:
+        description: "Path to topic definition file"
+        required: false
+        default: "kafka/topics.yaml"
+
+env:
+  TOPICS_FILE: ${{ github.event.inputs.topics_file || 'kafka/topics.yaml' }}
+
+jobs:
+  create-topics:
+    name: Create MSK Topics
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v1
+
+      - name: Sync dependencies
+        run: uv --project kafka sync --frozen
+
+      - name: Fetch bootstrap brokers
+        id: brokers
+        run: |
+          BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
+            --cluster-arn "${{ secrets.MSK_CLUSTER_ARN }}" \
+            --query "BootstrapBrokerStringSaslIam" \
+            --output text)
+          if [ -z "$BOOTSTRAP" ]; then
+            echo "Failed to fetch bootstrap brokers" >&2
+            exit 1
+          fi
+          echo "bootstrap=$BOOTSTRAP" >> "$GITHUB_OUTPUT"
+
+      - name: Create topics
+        run: |
+          uv --project kafka run python scripts/create_topics.py \
+            --bootstrap "${{ steps.brokers.outputs.bootstrap }}" \
+            --cluster-arn "${{ secrets.MSK_CLUSTER_ARN }}" \
+            --region "${{ secrets.AWS_REGION }}" \
+            --topics-file "$TOPICS_FILE"

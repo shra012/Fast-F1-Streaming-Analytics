@@ -1,0 +1,5 @@
+# Ignore editor and temporary documentation artifacts
+*.tmp
+*.log
+.DS_Store
+~$*

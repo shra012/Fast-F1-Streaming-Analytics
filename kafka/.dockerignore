@@ -1,0 +1,10 @@
+.venv
+.fastf1-cache
+__pycache__
+*.pyc
+.git
+.gitignore
+docker-compose.yaml
+README.md
+docs
+tests

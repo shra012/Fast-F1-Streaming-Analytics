@@ -1,0 +1,29 @@
+# General editor/OS clutter
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+
+# Environment & secrets files
+.env
+.env.*
+
+# Logs
+*.log
+
+# Terraform transient files (applies repo-wide)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+.DS_Store

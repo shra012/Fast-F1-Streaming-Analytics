@@ -1,0 +1,18 @@
+# Python build artifacts
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# Local environment configuration
+.env
+.env.*
+
+# FastF1 cache directory
+.fastf1-cache/
+
+# Logs and temp files
+*.log
+*.tmp

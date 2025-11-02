@@ -1,0 +1,16 @@
+[project]
+name = "fastf1-producer"
+version = "0.1.0"
+description = "Kafka tooling for streaming FastF1 telemetry to Amazon MSK."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+license = { text = "MIT" }
+dependencies = [
+  "aws-msk-iam-sasl-signer-python @ git+https://github.com/aws/aws-msk-iam-sasl-signer-python@v1.0.2",
+  "fastf1==3.6.1",
+  "kafka-python==2.0.2",
+  "python-dateutil==2.9.0.post0",
+  "PyYAML==6.0.1",
+  "tqdm==4.66.5",
+  "six==1.16.0",
+]

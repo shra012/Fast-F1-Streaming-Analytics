@@ -1,0 +1,9 @@
+# Test runner artifacts
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Coverage reports
+.coverage
+coverage.xml
+htmlcov/

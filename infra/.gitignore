@@ -1,0 +1,12 @@
+# Terraform local state and caches
+.terraform/
+terraform.tfstate
+terraform.tfstate.*
+*.tfplan
+
+# Generated configuration artifacts
+generated.auto.tfvars.json
+plan.tfplan
+
+# Local discovery outputs
+.preflight-cache/

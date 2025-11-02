@@ -1,0 +1,127 @@
+name: Deploy Fargate Producer
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "kafka/**"
+      - ".github/workflows/deploy-fargate-producer.yml"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Optional image tag override (defaults to short commit SHA)"
+        required: false
+
+jobs:
+  deploy:
+    name: Build and Deploy Producer
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ secrets.AWS_ECS_CLUSTER }}
+      ECS_SERVICE: ${{ secrets.AWS_ECS_SERVICE }}
+      ECS_CONTAINER_NAME: ${{ secrets.AWS_ECS_CONTAINER_NAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v1
+
+      - name: Sync dependencies
+        run: uv --project kafka sync --frozen
+
+      - name: Validate project imports
+        run: uv --project kafka run python -m compileall producer
+
+      - name: Determine image tag
+        id: image
+        run: |
+          TAG="${{ github.event.inputs.image_tag || '' }}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_SHA::7}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./kafka
+          file: ./kafka/Dockerfile
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.image.outputs.tag }}
+
+      - name: Capture image URI
+        id: image-uri
+        run: |
+          echo "uri=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.image.outputs.tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Export current task definition
+        id: taskdef
+        run: |
+          CURRENT_TASK_DEF=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          if [ -z "$CURRENT_TASK_DEF" ] || [ "$CURRENT_TASK_DEF" = "None" ]; then
+            echo "Unable to resolve current task definition" >&2
+            exit 1
+          fi
+
+          echo "arn=$CURRENT_TASK_DEF" >> "$GITHUB_OUTPUT"
+
+          aws ecs describe-task-definition \
+            --task-definition "$CURRENT_TASK_DEF" \
+            --query 'taskDefinition' \
+            --output json > taskdef.json
+
+      - name: Register new task definition revision
+        id: register
+        env:
+          IMAGE_URI: ${{ steps.image-uri.outputs.uri }}
+          CONTAINER_NAME: ${{ env.ECS_CONTAINER_NAME }}
+        run: |
+          jq \
+            --arg IMAGE "$IMAGE_URI" \
+            --arg NAME "$CONTAINER_NAME" \
+            'del(.status, .revision, .taskDefinitionArn, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt) |
+             .containerDefinitions = (.containerDefinitions | map(if .name == $NAME then .image = $IMAGE else . end))' \
+            taskdef.json > new-taskdef.json
+
+          NEW_TASK_DEF=$(aws ecs register-task-definition \
+            --cli-input-json file://new-taskdef.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          if [ -z "$NEW_TASK_DEF" ] || [ "$NEW_TASK_DEF" = "None" ]; then
+            echo "Failed to register new task definition" >&2
+            exit 1
+          fi
+
+          echo "arn=$NEW_TASK_DEF" >> "$GITHUB_OUTPUT"
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "${{ steps.register.outputs.arn }}" \
+            --force-new-deployment
