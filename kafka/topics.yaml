@@ -1,12 +1,11 @@
 # Default topic definitions for FastF1 telemetry streaming.
-# Adjust partition counts and replication factors per environment.
 
 - name: telemetry.fastf1.raw
   partitions: 3
   replication_factor: 3
   config:
     cleanup.policy: delete
-    retention.ms: 604800000        # 7 days
+    retention.ms: 604800000
     min.insync.replicas: 2
 
 - name: telemetry.fastf1.lap_summary
@@ -21,4 +20,4 @@
   replication_factor: 3
   config:
     cleanup.policy: delete
-    retention.ms: 31536000000       # 365 days
+    retention.ms: 604800000       

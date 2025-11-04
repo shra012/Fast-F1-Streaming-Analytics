@@ -12,6 +12,8 @@ __pycache__/
 *.pyd
 venv/
 .venv/
+spark/dist/
+.fastf1-cache
 
 # Environment & secrets files
 .env

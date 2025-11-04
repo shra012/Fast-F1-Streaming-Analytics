@@ -3,7 +3,7 @@
 Minimal FastF1 telemetry replay producer.
 
 Fetches telemetry for a single session, converts each lap into JSON, and publishes
-messages to an MSK topic using IAM authentication.
+messages to Kafka using IAM (MSK) or PLAINTEXT (local/docker) authentication.
 """
 
 from __future__ import annotations
@@ -17,14 +17,19 @@ from typing import Dict, Iterable, Tuple
 
 import fastf1
 import pandas as pd
-from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
+from aws_msk_iam_sasl_signer.MSKAuthTokenProvider import generate_auth_token
 import importlib
 import os
+import time
+
+from dotenv import load_dotenv
 
 importlib.import_module("kafka.vendor.six")
 from kafka import KafkaProducer
 from kafka.oauth.abstract import AbstractTokenProvider
 from tqdm import tqdm
+
+load_dotenv()
 
 
 @dataclass
@@ -44,33 +49,48 @@ class LapEvent:
 class IAMSaslTokenProvider(AbstractTokenProvider):
     """Adapter that generates tokens via the MSK IAM SASL signer."""
 
-    def __init__(self, cluster_arn: str, region: str) -> None:
-        self._cluster_arn = cluster_arn
-        self._signer = MSKAuthTokenProvider(region_name=region)
+    def __init__(self, region: str) -> None:
+        self._region = region
 
     def token(self) -> Tuple[str, float, str, Dict[str, str]]:
-        token, expiry = self._signer.get_token(cluster_arn=self._cluster_arn)
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        lifetime_seconds = max(1.0, (expiry - now).total_seconds())
+        token, expiry_ms = generate_auth_token(self._region)
+        now = time.time()
+        lifetime_seconds = max(1.0, (expiry_ms / 1000.0) - now)
         return token, lifetime_seconds, "", {}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay FastF1 telemetry to Kafka.")
+    env_bootstrap = os.getenv("KAFKA_BOOTSTRAP_BROKERS") or os.getenv(
+        "MSK_BOOTSTRAP_BROKERS"
+    )
+    env_cluster_arn = os.getenv("MSK_CLUSTER_ARN")
+    env_region = os.getenv("AWS_REGION")
+    env_auth_mode = os.getenv("KAFKA_AUTH_MODE", "iam").lower()
+    if env_auth_mode not in {"iam", "plain"}:
+        env_auth_mode = "iam"
     parser.add_argument(
         "--auth-mode",
         choices=["iam", "plain"],
-        default="iam",
-        help="Authentication mode for Kafka connection.",
+        default=env_auth_mode,
+        type=str.lower,
+        help="Authentication mode for Kafka connection (defaults to KAFKA_AUTH_MODE or 'iam').",
     )
-    parser.add_argument("--cluster-arn", help="MSK cluster ARN (required for iam).")
-    parser.add_argument("--region", help="AWS region (required for iam).")
+    parser.add_argument(
+        "--cluster-arn",
+        default=env_cluster_arn,
+        help="MSK cluster ARN (defaults to MSK_CLUSTER_ARN env var).",
+    )
+    parser.add_argument(
+        "--region",
+        default=env_region,
+        help="AWS region for MSK cluster (defaults to AWS_REGION env var).",
+    )
     parser.add_argument(
         "--bootstrap",
-        required=True,
-        help="Comma-separated bootstrap brokers.",
+        default=env_bootstrap,
+        required=env_bootstrap is None,
+        help="Comma-separated bootstrap brokers (defaults to MSK_BOOTSTRAP_BROKERS env var).",
     )
     parser.add_argument(
         "--topic", default="telemetry.fastf1.raw", help="Kafka topic for telemetry."
@@ -192,6 +212,11 @@ def laps_to_events(
 
 def main() -> None:
     args = parse_args()
+    if not args.bootstrap:
+        raise SystemExit(
+            "Bootstrap brokers are required. Provide --bootstrap or set "
+            "KAFKA_BOOTSTRAP_BROKERS/MSK_BOOTSTRAP_BROKERS."
+        )
     enable_fastf1_cache(args.cache_dir)
     session = load_session(args.season, args.event, args.session)
     events = list(laps_to_events(session, args.driver))
@@ -214,10 +239,11 @@ def main() -> None:
     }
     if args.auth_mode == "iam":
         if not args.cluster_arn or not args.region:
-            raise SystemExit("cluster-arn and region are required when auth-mode is iam.")
-        token_provider = IAMSaslTokenProvider(
-            cluster_arn=args.cluster_arn, region=args.region
-        )
+            raise SystemExit(
+                "cluster-arn and region are required when auth-mode is iam. "
+                "Set MSK_CLUSTER_ARN/AWS_REGION or pass them as arguments."
+            )
+        token_provider = IAMSaslTokenProvider(region=args.region)
         kafka_kwargs.update(
             {
                 "security_protocol": "SASL_SSL",

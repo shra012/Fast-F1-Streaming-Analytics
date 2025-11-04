@@ -15,6 +15,21 @@ variable "region" {
   type        = string
 }
 
+variable "checkpoints_bucket_name" {
+  description = "Name for the checkpoints bucket when created"
+  type        = string
+}
+
+variable "artifacts_bucket_name" {
+  description = "Name for the artifacts bucket when created"
+  type        = string
+}
+
+variable "raw_bucket_name" {
+  description = "Name for the raw bucket when created"
+  type        = string
+}
+
 variable "create_checkpoints_bucket" {
   description = "Whether to create checkpoints bucket"
   type        = bool
@@ -45,10 +60,10 @@ variable "tags" {
 
 resource "aws_s3_bucket" "checkpoints" {
   count  = var.create_checkpoints_bucket ? 1 : 0
-  bucket = "${var.project}-${var.environment}-checkpoints"
+  bucket = var.checkpoints_bucket_name
 
   tags = merge(var.tags, {
-    Name = "${var.project}-${var.environment}-checkpoints"
+    Name = var.checkpoints_bucket_name
     Type = "checkpoints"
   })
 }
@@ -77,10 +92,10 @@ resource "aws_s3_bucket_public_access_block" "checkpoints" {
 
 resource "aws_s3_bucket" "artifacts" {
   count  = var.create_artifacts_bucket ? 1 : 0
-  bucket = "${var.project}-${var.environment}-artifacts"
+  bucket = var.artifacts_bucket_name
 
   tags = merge(var.tags, {
-    Name = "${var.project}-${var.environment}-artifacts"
+    Name = var.artifacts_bucket_name
     Type = "artifacts"
   })
 }
@@ -109,10 +124,10 @@ resource "aws_s3_bucket_public_access_block" "artifacts" {
 
 resource "aws_s3_bucket" "raw" {
   count  = var.create_raw_bucket ? 1 : 0
-  bucket = "${var.project}-${var.environment}-raw"
+  bucket = var.raw_bucket_name
 
   tags = merge(var.tags, {
-    Name = "${var.project}-${var.environment}-raw"
+    Name = var.raw_bucket_name
     Type = "raw"
   })
 }
@@ -142,17 +157,17 @@ resource "aws_s3_bucket_public_access_block" "raw" {
 output "bucket_names" {
   description = "S3 bucket names"
   value = {
-    checkpoints = var.create_checkpoints_bucket ? aws_s3_bucket.checkpoints[0].id : ""
-    artifacts   = var.create_artifacts_bucket ? aws_s3_bucket.artifacts[0].id : ""
-    raw         = var.create_raw_bucket ? aws_s3_bucket.raw[0].id : ""
+    checkpoints = var.checkpoints_bucket_name
+    artifacts   = var.artifacts_bucket_name
+    raw         = var.raw_bucket_name
   }
 }
 
 output "bucket_arns" {
   description = "S3 bucket ARNs"
   value = {
-    checkpoints = var.create_checkpoints_bucket ? aws_s3_bucket.checkpoints[0].arn : ""
-    artifacts   = var.create_artifacts_bucket ? aws_s3_bucket.artifacts[0].arn : ""
-    raw         = var.create_raw_bucket ? aws_s3_bucket.raw[0].arn : ""
+    checkpoints = var.checkpoints_bucket_name != "" ? "arn:aws:s3:::${var.checkpoints_bucket_name}" : ""
+    artifacts   = var.artifacts_bucket_name != "" ? "arn:aws:s3:::${var.artifacts_bucket_name}" : ""
+    raw         = var.raw_bucket_name != "" ? "arn:aws:s3:::${var.raw_bucket_name}" : ""
   }
 }

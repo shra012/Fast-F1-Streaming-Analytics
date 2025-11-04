@@ -36,12 +36,6 @@ variable "create_s3_endpoint" {
   default     = true
 }
 
-variable "create_secretsmanager_endpoint" {
-  description = "Whether to create Secrets Manager endpoint"
-  type        = bool
-  default     = true
-}
-
 variable "create_kms_endpoint" {
   description = "Whether to create KMS endpoint"
   type        = bool
@@ -67,21 +61,6 @@ resource "aws_vpc_endpoint" "s3" {
 
   tags = merge(var.tags, {
     Name = "${var.project}-${var.environment}-s3-endpoint"
-  })
-}
-
-# Secrets Manager Interface Endpoint
-resource "aws_vpc_endpoint" "secretsmanager" {
-  count               = var.create_secretsmanager_endpoint ? 1 : 0
-  vpc_id              = var.vpc_id
-  service_name        = "com.amazonaws.${var.region}.secretsmanager"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = var.private_subnet_ids
-  security_group_ids  = var.security_group_ids
-  private_dns_enabled = true
-
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.environment}-secretsmanager-endpoint"
   })
 }
 
@@ -118,9 +97,8 @@ resource "aws_vpc_endpoint" "logs" {
 output "endpoint_ids" {
   description = "VPC endpoint IDs"
   value = {
-    s3             = var.create_s3_endpoint ? aws_vpc_endpoint.s3[0].id : ""
-    secretsmanager = var.create_secretsmanager_endpoint ? aws_vpc_endpoint.secretsmanager[0].id : ""
-    kms            = var.create_kms_endpoint ? aws_vpc_endpoint.kms[0].id : ""
-    logs           = var.create_logs_endpoint ? aws_vpc_endpoint.logs[0].id : ""
+    s3   = var.create_s3_endpoint ? aws_vpc_endpoint.s3[0].id : ""
+    kms  = var.create_kms_endpoint ? aws_vpc_endpoint.kms[0].id : ""
+    logs = var.create_logs_endpoint ? aws_vpc_endpoint.logs[0].id : ""
   }
 }

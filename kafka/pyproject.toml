@@ -13,4 +13,5 @@ dependencies = [
   "PyYAML==6.0.1",
   "tqdm==4.66.5",
   "six==1.16.0",
+  "python-dotenv>=1.2.1",
 ]

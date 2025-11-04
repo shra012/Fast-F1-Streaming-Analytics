@@ -1,66 +1,46 @@
 # F1 Streaming Graph Infrastructure
 
-Production-grade Terraform infrastructure for a Kafka → Spark → Neo4j streaming pipeline with intelligent AWS resource discovery.
+Production-grade Terraform infrastructure for a Kafka → Spark streaming pipeline with intelligent AWS resource discovery.
 
 ## Architecture
 
 ```
-┌─────────────────┐
-│ Producer (ECS)  │ (optional)
-│   Container     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐      ┌──────────────────┐      ┌──────────────┐
-│  Amazon MSK     │─────▶│ EMR Serverless   │─────▶│  Neo4j Aura  │
-│  (Kafka)        │      │ (Spark Streaming)│      │  (External)  │
-│  IAM Auth       │      │                  │      │              │
-└─────────────────┘      └──────────────────┘      └──────────────┘
-         │                        │                        ▲
-         │                        ▼                        │
-         │               ┌─────────────────┐              │
-         │               │  S3 Buckets     │              │
-         │               │  - checkpoints  │              │
-         │               │  - artifacts    │              │
-         │               │  - raw data     │              │
-         │               └─────────────────┘              │
-         │                                                 │
-         └─────────────── NAT Gateway ────────────────────┘
-                         (Public Egress)
+┌─────────────────┐      ┌────────────────────────────┐
+│  Amazon MSK     │─────▶│  EMR Cluster (Spark/YARN)  │
+│  (Kafka, IAM)   │      │  • Bronze/Silver/Gold jobs │
+└─────────────────┘      └─────────────┬──────────────┘
+                                       │
+                                ┌──────▼──────┐
+                                │   Amazon S3 │  (raw / artifacts / checkpoints)
+                                └─────────────┘
 
-Private Subnets: MSK, EMR, ECS
-Public Subnets: NAT Gateway
-VPC Endpoints: S3 (gateway), Secrets Manager, KMS, CloudWatch Logs (interface)
-Encryption: KMS CMKs for S3, Secrets Manager, MSK
-Security: Least-privilege SGs, IAM policies, TLS in-transit
+Private subnets host MSK brokers and EMR core nodes.
+Public subnets provide outbound access via a NAT Gateway.
+Gateway/interface VPC endpoints keep S3, KMS, and CloudWatch traffic inside the VPC.
+All data in transit uses TLS and KMS CMKs protect data at rest.
 ```
 
 ## What This Deploys
 
-### Core Infrastructure (Conditionally Created)
+### Core Infrastructure
 - **VPC & Networking**: 3 AZ VPC with private/public subnets, NAT Gateway, Internet Gateway
 - **Amazon MSK**: 3-broker Kafka cluster with IAM authentication and TLS encryption
-- **EMR Serverless**: Spark application for structured streaming
-- **S3 Buckets**: checkpoints, artifacts, raw data (SSE-KMS encrypted)
-- **KMS Keys**: Separate CMKs for data, secrets, and MSK encryption
-- **Security Groups**: Strict least-privilege rules for MSK, EMR, and Producer
-- **VPC Endpoints**: S3 gateway + interface endpoints for Secrets/KMS/Logs
-- **Secrets Manager**: Encrypted storage for Neo4j Aura credentials
-- **CloudWatch**: Log groups and alarms for monitoring
-- **IAM Roles**: Runtime roles for EMR and ECS with minimal permissions
-
-### Optional Components
-- **ECS Producer**: Fargate task for Kafka message production (toggle with `create_ecs_producer`)
+- **EMR Cluster (EC2)**: One master, two core nodes running Spark/YARN for Structured Streaming
+- **S3 Buckets**: raw landing zone, artifacts (silver/gold), checkpoints – all SSE-KMS encrypted with deterministic 6-char suffix for global uniqueness (override via `bucket_name_suffix`)
+- **KMS Keys**: Dedicated CMKs for data and MSK encryption
+- **Security Groups**: Least-privilege rules for MSK and EMR cluster traffic
+- **VPC Endpoints**: S3 gateway + interface endpoints for KMS/Logs
+- **CloudWatch**: Log groups and alarms for MSK/EMR observability
+- **IAM Roles**: EMR service/instance roles and supporting policies
 
 ### External Dependencies
-- **Neo4j Aura**: External managed graph database (you provide credentials)
 
 ## Cost Considerations
 
 ### Significant Costs (Production)
 - **NAT Gateway**: ~$32/month + data transfer ($0.045/GB)
 - **MSK**: kafka.m7g.large × 3 brokers = ~$500/month + storage
-- **EMR Serverless**: Pay per vCPU-hour and memory-GB-hour when running jobs
+- **EMR Cluster**: EC2 instances (master + core) billed hourly (plus storage/EBS)
 - **VPC Interface Endpoints**: ~$7/endpoint/month × 3 = ~$21/month
 
 ### Development Cost Optimization
@@ -74,8 +54,8 @@ msk_instance_type = "kafka.t3.small"  # Smaller instance for testing
 **Warning**: Single NAT Gateway eliminates redundancy. Only use for non-production.
 
 ### Estimated Monthly Costs
-- **Minimal (dev)**: ~$250/month (1 NAT, t3.small MSK, minimal usage)
-- **Production**: ~$600-800/month (HA NAT, m7g.large MSK, moderate usage)
+- **Minimal (dev)**: ~$350/month (1 NAT, t3.small MSK, m5.large EMR cluster, light usage)
+- **Production**: ~$900-1100/month (HA NAT, m7g.large MSK, m5.xlarge EMR cluster, moderate usage)
 
 ## Prerequisites
 
@@ -101,10 +81,9 @@ aws configure
 The IAM user/role running this needs:
 - VPC: Describe/Create VPCs, Subnets, Security Groups, Endpoints
 - MSK: Describe/Create Kafka clusters
-- EMR: Describe/Create Serverless applications
+- EMR: Describe/Create clusters (EC2), IAM instance/service roles, steps
 - S3: List/Create/Configure buckets
 - KMS: Describe/Create keys and aliases
-- Secrets Manager: Describe/Create secrets
 - IAM: Create roles and policies
 - CloudWatch: Create log groups and alarms
 
@@ -145,10 +124,8 @@ The `preflight.py` script intelligently discovers existing AWS resources to avoi
 
 3. **Resource Discovery**:
    - **S3 Buckets**: Matches `{project}-checkpoints|artifacts|raw` (case-insensitive)
-   - **KMS Keys**: Finds aliases `alias/{project}-data|secrets|msk`
+   - **KMS Keys**: Finds aliases `alias/{project}-data|msk`
    - **MSK Clusters**: Tagged `Project={project}`
-   - **EMR Apps**: Name contains project string
-   - **Secrets**: Checks for existing `neo4j/aura` secret
 
 4. **Output**: `generated.auto.tfvars.json` with discovered resource IDs
 
@@ -161,9 +138,8 @@ To override discovery, set explicit values:
 vpc_id = "vpc-abc123"
 private_subnet_ids = ["subnet-111", "subnet-222", "subnet-333"]
 security_group_ids = {
-  msk      = "sg-aaa111"
-  emr      = "sg-bbb222"
-  producer = "sg-ccc333"
+  msk = "sg-aaa111"
+  emr = "sg-bbb222"
 }
 
 existing_bucket_names = {
@@ -173,150 +149,58 @@ existing_bucket_names = {
 }
 
 existing_kms_keys = {
-  data    = "arn:aws:kms:us-east-1:123456789012:key/..."
-  secrets = "arn:aws:kms:us-east-1:123456789012:key/..."
-  msk     = "arn:aws:kms:us-east-1:123456789012:key/..."
+  data = "arn:aws:kms:us-east-1:123456789012:key/..."
+  msk  = "arn:aws:kms:us-east-1:123456789012:key/..."
 }
 
 existing_msk_cluster_arn = "arn:aws:kafka:us-east-1:123456789012:cluster/my-cluster/..."
-existing_emr_app_id      = "app-00a1b2c3d4e5f6g7"
+
+# Optional: provide a fixed suffix if you need predictable bucket names
+# bucket_name_suffix = "20240223153000"
 ```
 
-## Submitting a Spark Job to EMR Serverless
+## Running Spark Jobs on the EMR Cluster
 
-### 1. Package Your Spark Application
-
-```python
-# spark_kafka_neo4j.py
-from pyspark.sql import SparkSession
-import boto3
-import json
-
-# Fetch Neo4j credentials from Secrets Manager
-def get_neo4j_creds(secret_name, region):
-    client = boto3.client('secretsmanager', region_name=region)
-    response = client.get_secret_value(SecretId=secret_name)
-    return json.loads(response['SecretString'])
-
-spark = SparkSession.builder \
-    .appName("F1-Kafka-Neo4j-Stream") \
-    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.neo4j:neo4j-connector-apache-spark_2.12:5.2.0") \
-    .getOrCreate()
-
-# Get Neo4j credentials
-creds = get_neo4j_creds("neo4j/aura", "us-east-1")
-
-# Read from Kafka (MSK with IAM auth)
-df = spark.readStream \
-    .format("kafka") \
-    .option("kafka.bootstrap.servers", "BOOTSTRAP_BROKERS_HERE") \
-    .option("subscribe", "f1-telemetry") \
-    .option("kafka.security.protocol", "SASL_SSL") \
-    .option("kafka.sasl.mechanism", "AWS_MSK_IAM") \
-    .option("kafka.sasl.jaas.config", "software.amazon.msk.auth.iam.IAMLoginModule required;") \
-    .option("kafka.sasl.client.callback.handler.class", "software.amazon.msk.auth.iam.IAMClientCallbackHandler") \
-    .option("startingOffsets", "latest") \
-    .load()
-
-# Transform and write to Neo4j
-query = df.selectExpr("CAST(value AS STRING) as json") \
-    .writeStream \
-    .format("org.neo4j.spark.DataSource") \
-    .option("url", creds['bolt_url']) \
-    .option("authentication.basic.username", creds['username']) \
-    .option("authentication.basic.password", creds['password']) \
-    .option("labels", ":Telemetry") \
-    .option("node.keys", "timestamp,driver") \
-    .option("checkpointLocation", "s3://PROJECT-checkpoints/neo4j/") \
-    .start()
-
-query.awaitTermination()
-```
-
-### 2. Upload to S3
-
+### 1. Package and Upload the Application
+Use the helper Makefile in the `spark/` directory to bundle shared code and entry points:
 ```bash
-# Get S3 artifacts bucket from Terraform output
-ARTIFACTS_BUCKET=$(terraform output -raw s3_artifacts_bucket)
-
-# Upload your script
-aws s3 cp spark_kafka_neo4j.py s3://${ARTIFACTS_BUCKET}/scripts/
-
-# Upload any dependencies (if needed)
-aws s3 cp requirements.txt s3://${ARTIFACTS_BUCKET}/dependencies/
+cd spark
+make package
+make upload S3_PREFIX=s3://<artifact-bucket>/spark
 ```
+This uploads `spark_package.zip` plus the bronze/silver/gold entry point scripts to the specified prefix.
 
-### 3. Submit Job via AWS CLI
-
+### 2. Connect to the Cluster
+Fetch the cluster outputs after apply:
 ```bash
-# Get EMR app ID from Terraform output
-EMR_APP_ID=$(terraform output -raw emr_serverless_app_id)
-EMR_ROLE_ARN=$(terraform output -raw emr_execution_role_arn)
-MSK_BOOTSTRAP=$(terraform output -raw msk_bootstrap_brokers_sasl_iam)
-
-# Submit job
-aws emr-serverless start-job-run \
-    --application-id ${EMR_APP_ID} \
-    --execution-role-arn ${EMR_ROLE_ARN} \
-    --name "f1-kafka-neo4j-streaming" \
-    --job-driver '{
-        "sparkSubmit": {
-            "entryPoint": "s3://'${ARTIFACTS_BUCKET}'/scripts/spark_kafka_neo4j.py",
-            "sparkSubmitParameters": "--conf spark.executor.cores=4 --conf spark.executor.memory=16g --conf spark.driver.cores=2 --conf spark.driver.memory=8g --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.neo4j:neo4j-connector-apache-spark_2.12:5.2.0,software.amazon.msk:aws-msk-iam-auth:1.1.9"
-        }
-    }' \
-    --configuration-overrides '{
-        "monitoringConfiguration": {
-            "s3MonitoringConfiguration": {
-                "logUri": "s3://'${ARTIFACTS_BUCKET}'/logs/"
-            }
-        }
-    }'
+terraform output emr_cluster_id
+terraform output emr_cluster_master_dns
 ```
-
-### 4. Monitor Job
-
+SSH to the master node (ensure the EMR security group allows your IP/key pair):
 ```bash
-# Get job run ID from previous command output
-JOB_RUN_ID="<from-previous-output>"
-
-# Check status
-aws emr-serverless get-job-run \
-    --application-id ${EMR_APP_ID} \
-    --job-run-id ${JOB_RUN_ID}
-
-# View logs in CloudWatch or S3
-aws logs tail /aws/emr-serverless/${EMR_APP_ID} --follow
+ssh -i <key.pem> hadoop@$(terraform output -raw emr_cluster_master_dns)
 ```
 
-## Neo4j Aura Configuration
-
-See [neo4j_spark_config.md](./neo4j_spark_config.md) for detailed Spark configuration.
-
-### Required: Update Secrets Manager
-
-After deployment, update the Neo4j Aura credentials:
-
+### 3. Submit the Streaming Job (YARN)
+From the master node run `spark-submit` against YARN:
 ```bash
-aws secretsmanager update-secret \
-    --secret-id neo4j/aura \
-    --secret-string '{
-        "bolt_url": "neo4j+s://xxxxx.databases.neo4j.io",
-        "username": "neo4j",
-        "password": "your-actual-password"
-    }'
+spark-submit \
+  --master yarn \
+  --deploy-mode cluster \
+  --py-files s3://<artifact-bucket>/spark/spark_package.zip \
+  s3://<artifact-bucket>/spark/bronze_stream.py \
+  --bootstrap-servers "$(terraform output -raw msk_bootstrap_brokers_sasl_iam)" \
+  --telemetry-topic telemetry.raw \
+  --events-topic race.events \
+  --output-base $SPARK_BRONZE_BASE \
+  --checkpoint-base $SPARK_CHECKPOINT_BASE/bronze
 ```
+Repeat for the silver/gold entry points with their respective output/checkpoint paths or CLI overrides.
 
-### Network Access (IP Allowlisting)
-
-If your Neo4j Aura instance has IP allowlisting enabled, you must allow the NAT Gateway IP(s):
-
-```bash
-# Get NAT Gateway public IP(s)
-terraform output nat_gateway_public_ips
-
-# Add these IPs to Neo4j Aura allowlist in the Aura console
-```
+### 4. Monitor Jobs
+- YARN ResourceManager UI (port-forward via SSH if required)
+- `yarn application -list` and `yarn logs -applicationId <app-id>`
+- CloudWatch log group `/aws/emr/<cluster-name>` for driver/executor logs
 
 ## Validation & Linting
 
@@ -347,7 +231,6 @@ aws sts get-caller-identity
 ├── variables.tf                       # Input variables
 ├── outputs.tf                         # Output values
 ├── main.tf                            # Main infrastructure orchestration
-├── neo4j_spark_config.md             # Neo4j + Spark integration guide
 ├── examples/
 │   └── terraform.tfvars.example      # Example variable values
 └── modules/
@@ -356,9 +239,8 @@ aws sts get-caller-identity
     ├── kms/                          # KMS keys for encryption
     ├── sg/                           # Security groups
     ├── msk/                          # Amazon MSK cluster
-    ├── emr-serverless/               # EMR Serverless application
-    ├── vpc-endpoints/                # VPC endpoints
-    └── ecs-producer/                 # Optional ECS producer
+    ├── emr-cluster/                 # EMR Spark cluster (EC2)
+    └── vpc-endpoints/                # VPC endpoints
 ```
 
 ## Makefile Targets
@@ -415,10 +297,7 @@ existing_msk_cluster_arn = "arn:aws:kafka:..."
 - Check IAM role has `kafka-cluster:Connect` permission
 - Ensure EMR in same VPC as MSK
 
-### Neo4j Connection Issues
 - Verify NAT Gateway is working: `terraform output nat_gateway_public_ips`
-- Check Aura IP allowlist includes NAT IPs
-- Validate credentials in Secrets Manager
 
 ## Security Best Practices
 
@@ -426,7 +305,6 @@ existing_msk_cluster_arn = "arn:aws:kafka:..."
 - Least-privilege IAM roles and security groups
 - Private subnets for compute (no direct internet access)
 - S3 buckets block public access and enforce TLS
-- Secrets stored in AWS Secrets Manager
 - MSK uses IAM authentication (no credentials in code)
 - CloudWatch alarms for operational monitoring
 

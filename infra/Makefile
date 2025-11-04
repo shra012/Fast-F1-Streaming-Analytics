@@ -77,7 +77,7 @@ plan: preflight
 # Apply changes
 apply: preflight
 	@echo "Applying Terraform changes..."
-	terraform apply
+	terraform apply && ../scripts/sync_msk_env.sh
 
 # Destroy infrastructure
 destroy:

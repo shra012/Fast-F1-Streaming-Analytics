@@ -8,7 +8,7 @@ import boto3
 import json
 import os
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 import argparse
 import subprocess
 from subprocess import CalledProcessError
@@ -29,8 +29,6 @@ class AWSResourceDiscovery:
         self.s3 = boto3.client('s3', region_name=region)
         self.kms = boto3.client('kms', region_name=region)
         self.kafka = boto3.client('kafka', region_name=region)
-        self.emr = boto3.client('emr-serverless', region_name=region)
-        self.secretsmanager = boto3.client('secretsmanager', region_name=region)
         
         self.discovered = {
             'vpc_id': '',
@@ -43,12 +41,9 @@ class AWSResourceDiscovery:
             },
             'existing_kms_keys': {
                 'data': '',
-                'secrets': '',
                 'msk': ''
             },
-            'existing_msk_cluster_arn': '',
-            'existing_emr_app_id': '',
-            'existing_secret_arn': ''
+            'existing_msk_cluster_arn': ''
         }
     
     def log(self, message: str, force: bool = False):
@@ -181,15 +176,24 @@ class AWSResourceDiscovery:
                 Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
             )
             
+            # MSK doesn't support us-east-1e - filter it out
+            unsupported_azs = ['us-east-1e']
+            
             private_subnets = [
                 subnet['SubnetId']
                 for subnet in response['Subnets']
-                if self._is_private_subnet(subnet['SubnetId'])
+                if self._is_private_subnet(subnet['SubnetId']) and 
+                   subnet['AvailabilityZone'] not in unsupported_azs
             ]
 
             if not private_subnets:
-                fallback = [subnet['SubnetId'] for subnet in response['Subnets']]
-                self.log(f"No private subnets detected; using all subnets {fallback}", force=True)
+                # Fallback: use all subnets except unsupported AZs
+                fallback = [
+                    subnet['SubnetId'] 
+                    for subnet in response['Subnets']
+                    if subnet['AvailabilityZone'] not in unsupported_azs
+                ]
+                self.log(f"No private subnets detected; using all subnets (excluding {unsupported_azs}): {fallback}", force=True)
                 private_subnets = fallback
 
             self.discovered['private_subnet_ids'] = private_subnets
@@ -230,7 +234,7 @@ class AWSResourceDiscovery:
         """Discover existing KMS keys."""
         self.log("Discovering KMS keys...")
         
-        key_types = ['data', 'secrets', 'msk']
+        key_types = ['data', 'msk']
         
         try:
             for key_type in key_types:
@@ -313,56 +317,7 @@ class AWSResourceDiscovery:
         except Exception as e:
             self.log(f"Error discovering MSK cluster: {e}")
     
-    def discover_emr_application(self):
-        """Discover existing EMR Serverless application."""
-        self.log("Discovering EMR Serverless application...")
-        
-        try:
-            paginator = self.emr.get_paginator('list_applications')
-            
-            for page in paginator.paginate():
-                for app in page['applications']:
-                    app_id = app['id']
-                    app_name = app['name']
-                    app_type = app['type']
-                    
-                    # Only consider Spark applications
-                    if app_type != 'Spark':
-                        continue
-                    
-                    # Check if app name contains project
-                    if self.project.lower() in app_name.lower():
-                        self.discovered['existing_emr_app_id'] = app_id
-                        self.log(f"Found EMR Serverless app: {app_name} ({app_id})")
-                        return
-        except Exception as e:
-            self.log(f"Error discovering EMR Serverless application: {e}")
     
-    def discover_secret(self):
-        """Discover existing Secrets Manager secret."""
-        self.log("Discovering Secrets Manager secret...")
-        
-        secret_name = 'neo4j/aura'
-        
-        try:
-            if self.use_awscli:
-                out = self._run_awscli(["secretsmanager", "describe-secret", "--secret-id", secret_name, "--output", "json"]) 
-                response = json.loads(out)
-                secret_arn = response.get('ARN', '')
-            else:
-                response = self.secretsmanager.describe_secret(SecretId=secret_name)
-                secret_arn = response['ARN']
-
-            if secret_arn:
-                self.discovered['existing_secret_arn'] = secret_arn
-                self.log(f"Found secret: {secret_name} ({secret_arn})")
-            else:
-                self.log(f"Secret {secret_name} not found")
-        except self.secretsmanager.exceptions.ResourceNotFoundException:
-            self.log(f"Secret {secret_name} not found")
-        except Exception as e:
-            self.log(f"Error discovering secret: {e}")
-
     def _run_awscli(self, args: List[str]) -> str:
         """Run an AWS CLI command and return stdout as text. Raises on failure."""
         cmd = ["aws"] + args
@@ -382,8 +337,6 @@ class AWSResourceDiscovery:
         self.discover_s3_buckets()
         self.discover_kms_keys()
         self.discover_msk_cluster()
-        self.discover_emr_application()
-        self.discover_secret()
 
         # Limit private_subnet_ids to 3 for MSK compatibility (MSK requires 2-3 subnets)
         if len(self.discovered['private_subnet_ids']) > 3:
@@ -427,18 +380,6 @@ class AWSResourceDiscovery:
         else:
             print(f"\nMSK Cluster: create new")
         
-        # EMR
-        if self.discovered['existing_emr_app_id']:
-            print(f"\nEMR Serverless: reuse {self.discovered['existing_emr_app_id']}")
-        else:
-            print(f"\nEMR Serverless: create new")
-        
-        # Secret
-        if self.discovered['existing_secret_arn']:
-            print(f"\nSecrets Manager: reuse neo4j/aura")
-        else:
-            print(f"\nSecrets Manager: create new secret")
-        
         print("\n" + "="*70)
         print("Discovery complete. Generated: generated.auto.tfvars.json")
         print("="*70 + "\n")
@@ -480,7 +421,8 @@ class AWSResourceDiscovery:
                     content += f'\n{replacement}\n'
                 self.log(f"Updated private_subnet_ids with {len(private_subnets)} entries", force=True)
 
-            emr_initial_pattern = r'emr_initial_capacity\s*=\s*\{[^}]*\}'
+            # Update EMR capacity settings with proper nested brace matching
+            emr_initial_pattern = r'emr_initial_capacity\s*=\s*\{(?:[^{}]|\{[^}]*\})*\}'
             emr_initial_replacement = '''emr_initial_capacity = {
   driver = {
     cpu    = "1 vCPU"
@@ -493,7 +435,7 @@ class AWSResourceDiscovery:
 }'''
             content = re.sub(emr_initial_pattern, emr_initial_replacement, content, flags=re.DOTALL)
 
-            emr_max_pattern = r'emr_maximum_capacity\s*=\s*\{[^}]*\}'
+            emr_max_pattern = r'emr_maximum_capacity\s*=\s*\{(?:[^{}]|\{[^}]*\})*\}'
             emr_max_replacement = '''emr_maximum_capacity = {
   cpu    = "4 vCPU"
   memory = "8 GB"
