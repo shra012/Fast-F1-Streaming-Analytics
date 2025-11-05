@@ -1,8 +1,20 @@
 # Kafka Module Overview
 
-This directory houses the client-side components used to interact with the Amazon MSK cluster that powers our streaming pipeline. The initial focus is keeping things simple: create the Kafka topics we need and publish telemetry messages sourced from the FastF1 API. As the architecture matures, we will package these components for managed runtimes alongside the EMR cluster and add richer operational tooling.
+This directory houses the client-side components used to interact with the Amazon MSK cluster that powers our streaming pipeline. The producer streams F1 telemetry and race event data from the FastF1 API to Kafka topics, which are then consumed by our Bronze Spark Streaming jobs.
 
-## Repo Layout (initial)
+## Architecture
+
+```
+FastF1 API → producer.py → MSK Kafka
+                              ├─ telemetry.raw (car telemetry)
+                              └─ race.events (race control events)
+                                      ↓
+                              Bronze Spark Job (EMR)
+                                      ↓
+                                  S3 Bronze Layer (Delta/Parquet)
+```
+
+## Repo Layout
 ```
 kafka/
 ├── README.md                 # This document
@@ -11,14 +23,16 @@ kafka/
 ├── scripts/
 │   └── create_topics.py      # Helper to create topics in MSK
 └── producer/
-    └── simple_producer.py    # Minimal FastF1 replay producer
+    ├── producer.py           # Comprehensive F1 data producer
+    ├── run_producer.sh       # Helper script with Terraform integration
+    └── README.md             # Detailed producer documentation
 ```
 
 ## Prerequisites
 - Python 3.10+ with `pip`
-- AWS credentials configured (profile or env vars) with permissions for MSK and IAM auth
-- Working MSK cluster with IAM authentication enabled
-- Kafka client utilities available on the EMR cluster (or local environment)
+- AWS credentials configured (profile or env vars) with permissions for MSK
+- Working MSK cluster with **PLAINTEXT authentication** (unauthenticated mode)
+- Network access to MSK brokers (VPN or running inside VPC)
 
 Set up the project environment with [uv](https://github.com/astral-sh/uv):
 ```bash
@@ -51,17 +65,25 @@ If you prefer to capture the brokers manually, the AWS CLI provides the same dat
 ```bash
 aws kafka get-bootstrap-brokers \
   --cluster-arn $MSK_CLUSTER_ARN \
-  --query "BootstrapBrokerStringSaslIam" \
+  --query "BootstrapBrokerString" \
   --output text
 ```
 Record the comma-separated broker string; it is required for both topic creation and producing events.
 
+> **Note:** We use `BootstrapBrokerString` (plaintext on port 9092) instead of `BootstrapBrokerStringSaslIam` since we simplified the cluster to use unauthenticated mode.
+
 ## 2. Define Topics
 Edit `topics.yaml` to list the topics the platform needs. Each entry specifies partitions, replication factor, and optional configs. The defaults are tuned for development. Update replication factor to match the broker count when running in production.
 
-Example snippet:
+Current topics:
 ```yaml
-- name: telemetry.fastf1.raw
+- name: telemetry.raw       # Car telemetry (speed, throttle, GPS, etc.)
+  partitions: 3
+  replication_factor: 3
+  config:
+    cleanup.policy: delete
+
+- name: race.events         # Race events (laps, pit stops, flags, etc.)
   partitions: 3
   replication_factor: 3
   config:
@@ -90,90 +112,98 @@ topics that do not already exist and skip ones that are present.
 
 > **Note:** Topic creation uses the Kafka Admin client under the hood. Ensure the machine running the script has network access to the brokers (e.g., via VPN or by running inside the VPC).
 
-## 4. Run the Simple Producer
-The initial producer replays telemetry for a single session using the FastF1 API. It publishes lap-level messages to the configured topic with an adjustable playback speed (default is real-time).
+## 4. Run the Producer
+
+The producer streams comprehensive F1 data (telemetry and race events) from multiple seasons to Kafka topics. It matches the exact schemas expected by the Bronze Spark jobs.
+
+### Quick Start with Helper Script
+
+The `run_producer.sh` script automatically fetches MSK bootstrap servers from Terraform:
+
 ```bash
-python producer/simple_producer.py \
-  --cluster-arn $MSK_CLUSTER_ARN \
-  --region us-east-1 \
-  --bootstrap "$(aws kafka get-bootstrap-brokers --cluster-arn $MSK_CLUSTER_ARN --query "BootstrapBrokerStringSaslIam" --output text)" \
-  --topic telemetry.fastf1.raw \
-  --season 2023 \
-  --event "Bahrain Grand Prix" \
-  --session R \
+cd producer
+
+# Stream all 2024 data at 30x speed
+./run_producer.sh --start-year 2024 --speedup 30
+
+# Stream specific event
+./run_producer.sh --start-year 2024 --event "Monaco" --speedup 20
+
+# Dry run to preview data
+./run_producer.sh --start-year 2024 --event "Bahrain" --dry-run
+```
+
+### Manual Invocation
+
+Or invoke the producer directly:
+
+```bash
+# Get bootstrap servers from Terraform
+BOOTSTRAP=$(cd ../infra && terraform output -raw msk_bootstrap_brokers)
+
+# Stream 2024 data
+./producer.py \
+  --bootstrap "$BOOTSTRAP" \
+  --start-year 2024 \
   --speedup 30
+
+# Stream 2020-2024 for specific driver
+./producer.py \
+  --bootstrap "$BOOTSTRAP" \
+  --start-year 2020 \
+  --end-year 2024 \
+  --driver VER \
+  --speedup 50
 ```
-When `.env` contains the MSK values (`KAFKA_BOOTSTRAP_BROKERS`, `MSK_CLUSTER_ARN`, `AWS_REGION`),
-those arguments can be omitted:
+
+### Producer Features
+
+- **Multi-season support**: Process 2020-2025 data
+- **Two topics**: `telemetry.raw` (33 fields) and `race.events` (12 fields)
+- **Schema matching**: Exactly matches `spark/schemas.py`
+- **Configurable playback**: 1x to 100x+ speed
+- **Filtering**: By year, event, session, driver
+- **Batch processing**: Efficient Kafka publishing
+
+### Common Options
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--start-year` | Starting season | `2020` |
+| `--end-year` | Ending season | `2024` |
+| `--event` | Event name or round | `"Monaco"` or `5` |
+| `--session` | Session type | `R` (race), `Q` (quali) |
+| `--driver` | Driver code filter | `VER`, `HAM`, `LEC` |
+| `--speedup` | Playback multiplier | `30` (30x faster) |
+| `--dry-run` | Preview without sending | - |
+
+See `producer/README.md` for complete documentation.
+
+### Monitoring Production
+
+While the producer runs, monitor:
+- **Producer logs**: Messages published per topic
+- **Kafka topics**: Check lag in MSK console
+- **Bronze Spark job**: Verify consumption on EMR
+- **S3 Bronze layer**: Validate data written to Delta/Parquet
+
 ```bash
-python producer/simple_producer.py \
-  --season 2023 \
-  --event "Bahrain Grand Prix" \
-  --session R \
-  --speedup 30
-```
-When targeting the local Docker broker, run in PLAINTEXT mode:
-```bash
-python producer/simple_producer.py \
-  --auth-mode plain \
-  --bootstrap localhost:9092 \
-  --topic telemetry.fastf1.raw \
-  --season 2023 \
-  --event "Bahrain Grand Prix" \
-  --session R \
-  --speedup 30
-```
-Or use the helper script which reads defaults from `.env`:
-```bash
-./producer/start.sh
-# override on the fly, e.g.
-PRODUCER_MAX_EVENTS=100 PRODUCER_SPEEDUP=60 ./producer/start.sh
+# Check Bronze job status
+ssh -i ~/.ssh/id_rsa hadoop@<EMR_MASTER_DNS>
+yarn application -list
+
+# Check S3 bronze data
+aws s3 ls s3://<BRONZE_BUCKET>/bronze/ --recursive
 ```
 
-> **Tip:** `make consume-local` (or the `console-consumer` service in `docker-compose.yml`)
-> lets you watch the messages flowing into the local broker.
+## 5. Next Steps
+- Monitor Bronze Spark job consumption and validate S3 bronze layer data
+- Add schema registry validation once data flow is established
+- Extend producer with real-time F1 timing API integration (currently uses historical data)
+- Add health checks and structured logging for production deployment
+- Implement producer checkpointing for resumable sessions
 
-To verify events locally, launch the console consumer defined in `docker-compose.yml`.
-It defaults to the same telemetry topic but can be overridden with `KAFKA_TOPIC`:
-```bash
-make consume-local
-# or
-KAFKA_TOPIC=telemetry.fastf1.raw docker compose run --rm console-consumer
-```
-
-The script fetches telemetry via FastF1, normalizes each lap into JSON, and publishes it using IAM-authenticated SASL (or PLAINTEXT for local tests). Use the `--speedup` flag to accelerate playback during testing.
-
-Additional throttling flags help bound local test runs:
-- `--max-events` limits the number of lap events sent (0 = unlimited).
-- `--max-runtime` stops the producer after the specified number of seconds (0 = unlimited).
-
-## 5. Run the Producer in Docker
-Build the image and publish a handful of events to a local broker (the included `docker-compose.yaml` exposes Redpanda on `kafka_default`):
-```bash
-# Build the container (uses requirements.txt/pyproject.toml/uv.lock)
-docker build -t fastf1-producer:local -f Dockerfile .
-
-# Produce five events at high speed against the local broker
-docker run --rm \
-  --network kafka_default \
-  fastf1-producer:local \
-  --auth-mode plain \
-  --bootstrap redpanda:9092 \
-  --topic telemetry.fastf1.raw \
-  --season 2023 \
-  --event "Bahrain Grand Prix" \
-  --session R \
-  --speedup 1000 \
-  --max-events 5 \
-  --max-runtime 60
-```
-
-## 6. Next Steps
-- Add health checks, structured logging, and checkpointing before broader production deployment.
-- Introduce schema registry validation and error handling once we expand beyond the minimal prototype.
-- Extend the admin tooling with ACL management and topic configuration drift detection.
-
-## 7. CI Automation
+## 6. CI Automation
 - **Sync Kafka Topics** (`.github/workflows/msk-topic-sync.yml`): Runs the topic creation script automatically whenever `kafka/topics.yaml` changes, or on demand. Secrets required:
   - `AWS_ROLE_TO_ASSUME`
   - `AWS_REGION`

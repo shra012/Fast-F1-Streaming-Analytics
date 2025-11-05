@@ -49,6 +49,10 @@ locals {
   artifacts_bucket_arn   = local.artifacts_bucket != "" ? "arn:aws:s3:::${local.artifacts_bucket}" : ""
   raw_bucket_arn         = local.raw_bucket != "" ? "arn:aws:s3:::${local.raw_bucket}" : ""
 
+  emr_use_existing_key = var.emr_existing_key_name != ""
+  emr_create_key_pair  = !local.emr_use_existing_key && var.emr_ssh_public_key_path != ""
+  emr_key_pair_name    = local.emr_use_existing_key ? var.emr_existing_key_name : (var.emr_key_pair_name != "" ? var.emr_key_pair_name : "${var.project}-${var.environment}-emr-key")
+
   bronze_base_uri = local.raw_bucket != "" ? "s3://${local.raw_bucket}/bronze" : ""
   silver_base_uri = local.artifacts_bucket != "" ? "s3://${local.artifacts_bucket}/silver" : ""
   gold_base_uri   = local.artifacts_bucket != "" ? "s3://${local.artifacts_bucket}/gold" : ""
@@ -68,6 +72,19 @@ locals {
 
 }
 
+resource "aws_security_group_rule" "emr_client_ssh" {
+  for_each = local.security_groups.emr != "" && length(var.emr_ssh_ingress_cidrs) > 0 ? { for cidr in var.emr_ssh_ingress_cidrs : cidr => cidr } : {}
+
+  type              = "ingress"
+  from_port         = 22
+  to_port           = 22
+  protocol          = "tcp"
+  cidr_blocks       = [each.value]
+  security_group_id = local.security_groups.emr
+  description       = "Allow SSH from ${each.value}"
+}
+
+# Optional security group to allow SSH access into EMR nodes from specified CIDRs
 data "aws_vpc" "existing" {
   count = var.vpc_id != "" ? 1 : 0
   id    = var.vpc_id
@@ -118,6 +135,19 @@ module "s3" {
 }
 
 ################################################################################
+# EMR Key Pair (optional creation)
+################################################################################
+
+resource "aws_key_pair" "emr" {
+  count = local.emr_create_key_pair ? 1 : 0
+
+  key_name   = local.emr_key_pair_name
+  public_key = file(pathexpand(var.emr_ssh_public_key_path))
+
+  tags = local.common_tags
+}
+
+################################################################################
 # MSK Module - Kafka Cluster
 ################################################################################
 
@@ -136,6 +166,9 @@ module "msk" {
   ebs_volume_size = var.msk_ebs_volume_size
   kafka_version   = var.msk_kafka_version
   kms_key_arn     = local.kms_msk_key_arn
+
+  # Allow EMR cluster to connect to MSK (will be added after EMR is created)
+  allowed_security_group_ids = []
 
   tags = local.common_tags
 }
@@ -156,12 +189,16 @@ module "emr_cluster" {
   core_instance_count  = var.emr_cluster_core_instance_count
   subnet_id            = element(local.private_subnet_ids, 0)
   security_group_ids   = [for sg in [local.security_groups.emr] : sg if sg != ""]
+  ssh_ingress_cidrs    = var.emr_ssh_ingress_cidrs
   log_uri              = local.artifacts_bucket != "" ? "s3://${local.artifacts_bucket}/emr-logs/" : ""
   s3_bucket_arns       = local.s3_bucket_arns
   applications         = ["Spark"]
+  data_kms_key_arn     = local.kms_data_key_arn
+  msk_cluster_arn      = var.create_msk ? module.msk[0].cluster_arn : var.existing_msk_cluster_arn
+  ec2_key_name         = local.emr_use_existing_key ? var.emr_existing_key_name : (local.emr_create_key_pair ? aws_key_pair.emr[0].key_name : "")
   tags                 = local.common_tags
 
-  depends_on = [module.s3]
+  depends_on = [module.s3, module.msk]
 }
 
 ################################################################################
@@ -210,6 +247,25 @@ resource "aws_cloudwatch_metric_alarm" "msk_disk_usage" {
   }
 
   tags = local.common_tags
+}
+
+################################################################################
+# Security Group Rules - Cross-module connections
+################################################################################
+
+# Allow EMR to connect to MSK
+resource "aws_security_group_rule" "emr_to_msk" {
+  count = var.create_msk && var.create_emr_cluster ? 1 : 0
+
+  type                     = "ingress"
+  from_port                = 9098
+  to_port                  = 9098
+  protocol                 = "tcp"
+  source_security_group_id = module.emr_cluster[0].master_security_group_id
+  security_group_id        = module.msk[0].security_group_id
+  description              = "Allow EMR cluster to connect to MSK (SASL/IAM)"
+
+  depends_on = [module.msk, module.emr_cluster]
 }
 
 ################################################################################

@@ -59,6 +59,25 @@ variable "tags" {
   type        = map(string)
 }
 
+variable "allowed_security_group_ids" {
+  description = "Security group IDs allowed to connect to MSK"
+  type        = list(string)
+  default     = []
+}
+
+# Security group rules to allow connections from other services (e.g., EMR, Fargate)
+resource "aws_security_group_rule" "msk_ingress" {
+  for_each = toset(var.allowed_security_group_ids)
+
+  type                     = "ingress"
+  from_port                = 9092
+  to_port                  = 9092
+  protocol                 = "tcp"
+  source_security_group_id = each.value
+  security_group_id        = var.security_group_ids[0]
+  description              = "Allow plaintext connections from ${each.value}"
+}
+
 resource "aws_msk_cluster" "main" {
   cluster_name           = "${var.project}-${var.environment}"
   kafka_version          = var.kafka_version
@@ -76,9 +95,15 @@ resource "aws_msk_cluster" "main" {
     }
   }
 
+  lifecycle {
+    ignore_changes = [
+      broker_node_group_info[0].security_groups
+    ]
+  }
+
   encryption_info {
     encryption_in_transit {
-      client_broker = "TLS"
+      client_broker = "TLS_PLAINTEXT"
       in_cluster    = true
     }
 
@@ -86,9 +111,7 @@ resource "aws_msk_cluster" "main" {
   }
 
   client_authentication {
-    sasl {
-      iam = true
-    }
+    unauthenticated = true
   }
 
   logging_info {
@@ -122,9 +145,9 @@ output "cluster_name" {
   value       = aws_msk_cluster.main.cluster_name
 }
 
-output "bootstrap_brokers_sasl_iam" {
-  description = "MSK bootstrap brokers (SASL/IAM)"
-  value       = aws_msk_cluster.main.bootstrap_brokers_sasl_iam
+output "bootstrap_brokers" {
+  description = "MSK bootstrap brokers (plaintext)"
+  value       = aws_msk_cluster.main.bootstrap_brokers
   sensitive   = true
 }
 
@@ -132,4 +155,9 @@ output "zookeeper_connect_string" {
   description = "MSK Zookeeper connection string"
   value       = aws_msk_cluster.main.zookeeper_connect_string
   sensitive   = true
+}
+
+output "security_group_id" {
+  description = "MSK security group ID"
+  value       = tolist(aws_msk_cluster.main.broker_node_group_info[0].security_groups)[0]
 }

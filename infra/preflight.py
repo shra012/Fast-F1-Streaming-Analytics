@@ -46,6 +46,36 @@ class AWSResourceDiscovery:
             'existing_msk_cluster_arn': ''
         }
     
+    def check_terraform_state(self) -> dict:
+        """Check if resources are already managed by Terraform state."""
+        state_resources = {
+            'has_msk': False,
+            'has_kms_data': False,
+            'has_kms_msk': False
+        }
+        
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['terraform', 'state', 'list'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                state_list = result.stdout
+                state_resources['has_msk'] = 'module.msk[0].aws_msk_cluster.main' in state_list
+                state_resources['has_kms_data'] = 'module.kms.aws_kms_key.data[0]' in state_list
+                state_resources['has_kms_msk'] = 'module.kms.aws_kms_key.msk[0]' in state_list
+                
+                if any(state_resources.values()):
+                    self.log(f"Terraform state check: {state_resources}", force=True)
+        except Exception as e:
+            self.log(f"Could not check Terraform state: {e}")
+        
+        return state_resources
+    
     def log(self, message: str, force: bool = False):
         """Print debug message if debug mode is enabled."""
         if self.debug or force:
@@ -234,6 +264,12 @@ class AWSResourceDiscovery:
         """Discover existing KMS keys."""
         self.log("Discovering KMS keys...")
         
+        # Skip discovery if keys are already managed by Terraform
+        state = self.check_terraform_state()
+        if state.get('has_kms_data') or state.get('has_kms_msk'):
+            self.log("KMS keys already managed by Terraform, skipping discovery", force=True)
+            return
+        
         key_types = ['data', 'msk']
         
         try:
@@ -283,6 +319,12 @@ class AWSResourceDiscovery:
     def discover_msk_cluster(self):
         """Discover existing MSK cluster."""
         self.log("Discovering MSK cluster...")
+        
+        # Skip discovery if MSK is already managed by Terraform
+        state = self.check_terraform_state()
+        if state.get('has_msk'):
+            self.log("MSK cluster already managed by Terraform, skipping discovery", force=True)
+            return
         
         try:
             if self.use_awscli:
@@ -384,6 +426,18 @@ class AWSResourceDiscovery:
         print("Discovery complete. Generated: generated.auto.tfvars.json")
         print("="*70 + "\n")
 
+    def get_public_ip(self) -> str:
+        """Get the current public IP address for SSH access."""
+        try:
+            import urllib.request
+            with urllib.request.urlopen('https://checkip.amazonaws.com', timeout=5) as response:
+                public_ip = response.read().decode('utf-8').strip()
+                self.log(f"Detected public IP: {public_ip}", force=True)
+                return public_ip
+        except Exception as e:
+            self.log(f"Warning: Could not detect public IP: {e}", force=True)
+            return ""
+
     def update_terraform_tfvars(self, tfvars_path: str = 'terraform.tfvars') -> bool:
         """Update terraform.tfvars with discovered VPC information and minimal EMR settings."""
         try:
@@ -447,6 +501,23 @@ class AWSResourceDiscovery:
                 'emr_idle_timeout       = 60',
                 content
             )
+
+            # Update SSH ingress CIDR with current public IP
+            public_ip = self.get_public_ip()
+            if public_ip:
+                ssh_cidr_pattern = r'emr_ssh_ingress_cidrs\s*=\s*\[.*?\]'
+                ssh_cidr_replacement = f'emr_ssh_ingress_cidrs    = ["{public_ip}/32"]'
+                if re.search(ssh_cidr_pattern, content):
+                    content = re.sub(ssh_cidr_pattern, ssh_cidr_replacement, content, flags=re.DOTALL)
+                    self.log(f"Updated emr_ssh_ingress_cidrs to {public_ip}/32", force=True)
+                elif re.search(r'#\s*emr_ssh_ingress_cidrs', content):
+                    # Uncomment if it's commented
+                    content = re.sub(
+                        r'#\s*emr_ssh_ingress_cidrs.*',
+                        ssh_cidr_replacement,
+                        content
+                    )
+                    self.log(f"Enabled and updated emr_ssh_ingress_cidrs to {public_ip}/32", force=True)
 
             if content != original_content:
                 with open(tfvars_path, 'w') as f:

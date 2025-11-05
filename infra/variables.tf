@@ -94,6 +94,30 @@ variable "create_emr_cluster" {
   default     = false
 }
 
+variable "emr_existing_key_name" {
+  description = "Existing EC2 key pair name to attach to the EMR cluster (leave blank to create one)"
+  type        = string
+  default     = ""
+}
+
+variable "emr_key_pair_name" {
+  description = "Key pair name to create for EMR when no existing key is provided"
+  type        = string
+  default     = ""
+}
+
+variable "emr_ssh_public_key_path" {
+  description = "Path to the SSH public key used to create the EMR key pair (ignored when emr_existing_key_name is set)"
+  type        = string
+  default     = "~/.ssh/id_rsa.pub"
+}
+
+variable "emr_ssh_ingress_cidrs" {
+  description = "CIDR blocks allowed to SSH into EMR master/core nodes (e.g., [\"203.0.113.10/32\"])"
+  type        = list(string)
+  default     = []
+}
+
 # MSK Configuration
 variable "msk_instance_type" {
   description = "MSK broker instance type"

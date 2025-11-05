@@ -77,9 +77,9 @@ output "msk_cluster_arn" {
   value       = var.existing_msk_cluster_arn != "" ? var.existing_msk_cluster_arn : (var.create_msk ? module.msk[0].cluster_arn : "")
 }
 
-output "msk_bootstrap_brokers_sasl_iam" {
-  description = "MSK bootstrap brokers (SASL/IAM)"
-  value       = var.existing_msk_cluster_arn != "" ? data.aws_msk_cluster.existing[0].bootstrap_brokers_sasl_iam : (var.create_msk ? module.msk[0].bootstrap_brokers_sasl_iam : "")
+output "msk_bootstrap_brokers" {
+  description = "MSK bootstrap brokers (plaintext)"
+  value       = var.existing_msk_cluster_arn != "" ? data.aws_msk_cluster.existing[0].bootstrap_brokers : (var.create_msk ? module.msk[0].bootstrap_brokers : "")
   sensitive   = true
 }
 
@@ -89,3 +89,28 @@ output "msk_zookeeper_connect_string" {
   sensitive   = true
 }
 
+# EMR Outputs
+output "emr_cluster_id" {
+  description = "EMR cluster ID"
+  value       = var.create_emr_cluster ? module.emr_cluster[0].cluster_id : ""
+}
+
+output "emr_cluster_master_public_dns" {
+  description = "EMR master public DNS"
+  value       = var.create_emr_cluster ? module.emr_cluster[0].master_public_dns : ""
+}
+
+output "emr_service_role_arn" {
+  description = "EMR service role ARN"
+  value       = var.create_emr_cluster ? module.emr_cluster[0].service_role_arn : ""
+}
+
+output "emr_instance_profile_arn" {
+  description = "EMR EC2 instance profile ARN"
+  value       = var.create_emr_cluster ? module.emr_cluster[0].instance_profile_arn : ""
+}
+
+output "emr_key_pair_name" {
+  description = "EC2 key pair name associated with the EMR cluster"
+  value       = local.emr_key_pair_name
+}

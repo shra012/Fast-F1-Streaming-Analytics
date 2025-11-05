@@ -24,38 +24,86 @@ make package                 # produces dist/spark_package.zip
 
 The archive contains the entire `spark` package (including utils and schemas).
 Attach the zip via `--py-files` when invoking `spark-submit` on EMR.
-Environment variables such as `SPARK_BRONZE_BASE` can be populated from Terraform
-outputs by running `../scripts/sync_msk_env.sh`, which updates `kafka/.env`.
 
-## Upload to S3
+## Upload Artifacts
 
-Pick a code bucket (for example, `s3://fastf1-artifacts/spark/`) and upload:
+Sync the build products to the artifacts bucket that Terraform wires for EMR:
 
 ```bash
-make upload S3_PREFIX=s3://fastf1-artifacts/spark
+# Upload package + entrypoints to the artifacts bucket under a spark/ prefix
+make upload S3_PREFIX="s3://$(terraform -chdir=../infra output -raw s3_artifacts_bucket)/spark"
 ```
 
-Record the S3 URIs; they are referenced by `spark-submit` on EMR.
+Note the resulting URIs—they are referenced by the submission commands below.
+
+## Terraform Outputs Needed at Runtime
+
+After `terraform apply` finishes, capture the runtime values:
+
+```bash
+cd ../infra
+export EMR_MASTER_DNS=$(terraform output -raw emr_cluster_master_public_dns)
+export EMR_CLUSTER_ID=$(terraform output -raw emr_cluster_id)
+export KAFKA_BOOTSTRAP=$(terraform output -raw msk_bootstrap_brokers_sasl_iam)
+export SPARK_BRONZE_BASE=$(terraform output -raw spark_bronze_base_uri)
+export SPARK_SILVER_BASE=$(terraform output -raw spark_silver_base_uri)
+export SPARK_GOLD_BASE=$(terraform output -raw spark_gold_base_uri)
+export SPARK_CHECKPOINT_BASE=$(terraform output -raw s3_checkpoint_uri)
+export SPARK_ARTIFACT_BUCKET=$(terraform output -raw s3_artifacts_bucket)
+cd ../spark   # return to spark/ working tree for the commands below
+```
+
+These exports make it easy to copy-paste the commands below. The MSK bootstrap
+value is sensitive—avoid printing it to shared logs.
+
+> **Quick automation**: from the repo root run `./scripts/prepare_emr_job.sh`.
+> It packages the Spark code, uploads it to S3, generates `spark/emr_job.env`,
+> and prints ready-to-use `scp`, `ssh`, and `spark-submit` commands. The script
+> assumes `terraform apply` has completed successfully in `infra/`.
 
 ## Running on the EMR Cluster
 
-1. **Upload artifacts** – ensure `spark_package.zip` and the entrypoint scripts are in S3 (see “Packaging” above).
-2. **SSH to the master node** – use `terraform output emr_cluster_master_dns` and your key pair.
-3. **Submit a job** – from the master:
+1. **Upload artifacts** – ensure `spark_package.zip` and the entrypoint scripts exist under `s3://$SPARK_ARTIFACT_BUCKET/spark/`.
+2. **SSH to the master node** – use the DNS output and your key pair:
+   ```bash
+   ssh -i <path-to-key.pem> hadoop@$EMR_MASTER_DNS
+   ```
+3. **Submit the Bronze job** – from the EMR master:
    ```bash
    spark-submit \
      --master yarn \
      --deploy-mode cluster \
-     --py-files s3://<artifact-bucket>/spark/spark_package.zip \
-     s3://<artifact-bucket>/spark/bronze_stream.py \
-     --bootstrap-servers "$(terraform output -raw msk_bootstrap_brokers_sasl_iam)" \
+     --py-files s3://$SPARK_ARTIFACT_BUCKET/spark/spark_package.zip \
+     s3://$SPARK_ARTIFACT_BUCKET/spark/bronze_stream.py \
+     --bootstrap-servers "$KAFKA_BOOTSTRAP" \
      --telemetry-topic telemetry.raw \
      --events-topic race.events \
-     --output-base $SPARK_BRONZE_BASE \
-     --checkpoint-base $SPARK_CHECKPOINT_BASE/bronze
+     --output-base "$SPARK_BRONZE_BASE" \
+     --checkpoint-base "$SPARK_CHECKPOINT_BASE/bronze"
    ```
-   Repeat for silver/gold entry points with their respective output/checkpoint paths or overrides.
-4. **Monitor** – use YARN (`yarn application -list`, `yarn logs`), the ResourceManager UI, and CloudWatch log group `/aws/emr/<cluster-name>`.
+4. **Submit Silver / Gold jobs** – repeat with `silver_stream.py` and `gold_stream.py`, adjusting arguments:
+   ```bash
+   # Silver
+   spark-submit \
+     --master yarn \
+     --deploy-mode cluster \
+     --py-files s3://$SPARK_ARTIFACT_BUCKET/spark/spark_package.zip \
+     s3://$SPARK_ARTIFACT_BUCKET/spark/silver_stream.py \
+     --bronze-base "$SPARK_BRONZE_BASE" \
+     --output-base "$SPARK_SILVER_BASE" \
+     --checkpoint-base "$SPARK_CHECKPOINT_BASE/silver"
+
+   # Gold
+   spark-submit \
+     --master yarn \
+     --deploy-mode cluster \
+     --py-files s3://$SPARK_ARTIFACT_BUCKET/spark/spark_package.zip \
+     s3://$SPARK_ARTIFACT_BUCKET/spark/gold_stream.py \
+     --silver-base "$SPARK_SILVER_BASE" \
+     --output-base "$SPARK_GOLD_BASE" \
+     --checkpoint-base "$SPARK_CHECKPOINT_BASE/gold"
+   ```
+5. **Monitor execution** – leverage YARN CLI (`yarn application -list`, `yarn logs -applicationId ...`), the ResourceManager UI (tunnel via SSH), and CloudWatch log group `/aws/emr/<cluster-name>`.
 
 ### Common Spark Arguments
 

@@ -27,6 +27,7 @@ All data in transit uses TLS and KMS CMKs protect data at rest.
 - **Amazon MSK**: 3-broker Kafka cluster with IAM authentication and TLS encryption
 - **EMR Cluster (EC2)**: One master, two core nodes running Spark/YARN for Structured Streaming
 - **S3 Buckets**: raw landing zone, artifacts (silver/gold), checkpoints – all SSE-KMS encrypted with deterministic 6-char suffix for global uniqueness (override via `bucket_name_suffix`)
+- **SSH Key Pair**: Imports your local public key (or reuses an existing AWS key pair) for EMR SSH access
 - **KMS Keys**: Dedicated CMKs for data and MSK encryption
 - **Security Groups**: Least-privilege rules for MSK and EMR cluster traffic
 - **VPC Endpoints**: S3 gateway + interface endpoints for KMS/Logs
@@ -133,6 +134,9 @@ The `preflight.py` script intelligently discovers existing AWS resources to avoi
 
 To override discovery, set explicit values:
 
+> **SSH access**: by default Terraform imports `~/.ssh/id_rsa.pub` into a key pair named `<project>-<environment>-emr-key`. Provide `emr_existing_key_name` to reuse an existing AWS key pair instead, or change `emr_key_pair_name` / `emr_ssh_public_key_path` to match your environment. The corresponding private key is needed for `ssh`/`scp`.
+> Set `emr_ssh_ingress_cidrs = ["<your-public-ip>/32"]` to open port 22 on the EMR master/core nodes for your workstation.
+
 ```hcl
 # terraform.tfvars
 vpc_id = "vpc-abc123"
@@ -154,6 +158,10 @@ existing_kms_keys = {
 }
 
 existing_msk_cluster_arn = "arn:aws:kafka:us-east-1:123456789012:cluster/my-cluster/..."
+emr_existing_key_name   = ""                          # Provide existing key pair name or leave blank
+emr_key_pair_name       = "f1-streaming-dev-emr-key"  # Optional custom name when creating a key pair
+emr_ssh_public_key_path = "~/.ssh/id_rsa.pub"
+emr_ssh_ingress_cidrs  = ["203.0.113.10/32"]          # Replace with your workstation's public IP
 
 # Optional: provide a fixed suffix if you need predictable bucket names
 # bucket_name_suffix = "20240223153000"

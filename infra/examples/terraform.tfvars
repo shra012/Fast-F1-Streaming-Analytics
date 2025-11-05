@@ -55,7 +55,11 @@ existing_kms_keys = {
   msk  = ""
 }
 
-existing_msk_cluster_arn = "" # Provide ARN to reuse an existing MSK cluster
+existing_msk_cluster_arn = "arn:aws:kafka:us-east-1:061391278833:cluster/f1-streaming-graph-dev/a4bdf626-1722-4df1-b27c-de62ffe2cd90-19" # Provide ARN to reuse an existing MSK cluster
+emr_existing_key_name    = "" # Set if you already have a key pair in AWS
+emr_key_pair_name        = "" # Optional custom name when creating a new key pair
+emr_ssh_public_key_path  = "~/.ssh/id_rsa.pub"
+emr_ssh_ingress_cidrs    = ["203.0.113.10/32"] # Replace with your public IP address
 
 # Optional: pin the S3 bucket suffix if you need a predictable name
 # bucket_name_suffix = "20240223"
