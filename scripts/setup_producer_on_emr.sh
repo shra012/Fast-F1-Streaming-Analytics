@@ -10,7 +10,7 @@ INFRA_DIR="${REPO_ROOT}/infra"
 # Get EMR and MSK details from Terraform
 EMR_MASTER_DNS=$(terraform -chdir="${INFRA_DIR}" output -raw emr_cluster_master_public_dns)
 KAFKA_BOOTSTRAP=$(terraform -chdir="${INFRA_DIR}" output -raw msk_bootstrap_brokers)
-SSH_KEY="${HOME}/.ssh/REDACTED.pem"
+SSH_KEY="${HOME}/.ssh/id_rsa"
 
 if [[ -z "${EMR_MASTER_DNS}" ]]; then
   echo "Error: Could not get EMR master DNS"
