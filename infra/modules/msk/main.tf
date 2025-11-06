@@ -65,6 +65,39 @@ variable "allowed_security_group_ids" {
   default     = []
 }
 
+# Create a security group for MSK if none provided
+resource "aws_security_group" "msk" {
+  count = length(var.security_group_ids) == 0 ? 1 : 0
+
+  name_prefix = "${var.project}-${var.environment}-msk-"
+  description = "Security group for MSK cluster"
+  vpc_id      = var.vpc_id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound traffic"
+  }
+
+  tags = merge(
+    var.tags,
+    {
+      Name = "${var.project}-${var.environment}-msk"
+    }
+  )
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+locals {
+  # Use provided security groups if available, otherwise use the created one
+  msk_security_groups = length(var.security_group_ids) > 0 ? var.security_group_ids : [aws_security_group.msk[0].id]
+}
+
 # Security group rules to allow connections from other services (e.g., EMR, Fargate)
 resource "aws_security_group_rule" "msk_ingress" {
   for_each = toset(var.allowed_security_group_ids)
@@ -74,7 +107,7 @@ resource "aws_security_group_rule" "msk_ingress" {
   to_port                  = 9092
   protocol                 = "tcp"
   source_security_group_id = each.value
-  security_group_id        = var.security_group_ids[0]
+  security_group_id        = local.msk_security_groups[0]
   description              = "Allow plaintext connections from ${each.value}"
 }
 
@@ -86,7 +119,7 @@ resource "aws_msk_cluster" "main" {
   broker_node_group_info {
     instance_type   = var.instance_type
     client_subnets  = var.subnet_ids
-    security_groups = var.security_group_ids
+    security_groups = local.msk_security_groups
 
     storage_info {
       ebs_storage_info {
@@ -159,5 +192,5 @@ output "zookeeper_connect_string" {
 
 output "security_group_id" {
   description = "MSK security group ID"
-  value       = tolist(aws_msk_cluster.main.broker_node_group_info[0].security_groups)[0]
+  value       = local.msk_security_groups[0]
 }

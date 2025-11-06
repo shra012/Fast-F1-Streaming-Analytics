@@ -143,6 +143,12 @@ variable "msk_kafka_version" {
   default     = "3.6.0"
 }
 
+variable "msk_client_ingress_cidrs" {
+  description = "List of CIDR blocks allowed to connect to MSK (e.g., your laptop IP)"
+  type        = list(string)
+  default     = []
+}
+
 variable "emr_cluster_master_instance_type" {
   description = "Instance type for EMR cluster master node"
   type        = string

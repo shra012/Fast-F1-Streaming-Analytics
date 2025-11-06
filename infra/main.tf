@@ -195,6 +195,7 @@ module "emr_cluster" {
   applications         = ["Spark"]
   data_kms_key_arn     = local.kms_data_key_arn
   msk_cluster_arn      = var.create_msk ? module.msk[0].cluster_arn : var.existing_msk_cluster_arn
+  enable_msk_access    = var.create_msk || var.existing_msk_cluster_arn != ""
   ec2_key_name         = local.emr_use_existing_key ? var.emr_existing_key_name : (local.emr_create_key_pair ? aws_key_pair.emr[0].key_name : "")
   tags                 = local.common_tags
 
@@ -258,16 +259,33 @@ resource "aws_security_group_rule" "emr_to_msk" {
   count = var.create_msk && var.create_emr_cluster ? 1 : 0
 
   type                     = "ingress"
-  from_port                = 9098
-  to_port                  = 9098
+  from_port                = 9092
+  to_port                  = 9092
   protocol                 = "tcp"
   source_security_group_id = module.emr_cluster[0].master_security_group_id
   security_group_id        = module.msk[0].security_group_id
-  description              = "Allow EMR cluster to connect to MSK (SASL/IAM)"
+  description              = "Allow EMR cluster to connect to MSK (plaintext)"
 
   depends_on = [module.msk, module.emr_cluster]
+}
+
+# Allow client IPs (e.g., laptop) to connect to MSK
+resource "aws_security_group_rule" "client_to_msk" {
+  count = var.create_msk && length(var.msk_client_ingress_cidrs) > 0 ? length(var.msk_client_ingress_cidrs) : 0
+
+  type              = "ingress"
+  from_port         = 9092
+  to_port           = 9092
+  protocol          = "tcp"
+  cidr_blocks       = [var.msk_client_ingress_cidrs[count.index]]
+  security_group_id = module.msk[0].security_group_id
+  description       = "Allow client access to MSK from ${var.msk_client_ingress_cidrs[count.index]}"
+
+  depends_on = [module.msk]
 }
 
 ################################################################################
 # Outputs Note
 ################################################################################
+
+# See outputs.tf for all output definitions

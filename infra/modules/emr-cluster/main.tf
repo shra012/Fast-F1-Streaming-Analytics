@@ -83,6 +83,12 @@ variable "msk_cluster_arn" {
   default     = ""
 }
 
+variable "enable_msk_access" {
+  description = "Enable MSK access IAM policy"
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   description = "Common tags"
   type        = map(string)
@@ -178,7 +184,7 @@ resource "aws_iam_role_policy" "emr_kms_access" {
 }
 
 resource "aws_iam_role_policy" "emr_msk_access" {
-  count = var.msk_cluster_arn != "" ? 1 : 0
+  count = var.enable_msk_access ? 1 : 0
   name  = "${var.project}-${var.environment}-emr-msk-policy"
   role  = aws_iam_role.emr_ec2.id
 

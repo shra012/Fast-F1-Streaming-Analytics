@@ -1,6 +1,6 @@
 # Default topic definitions for FastF1 telemetry streaming.
 
-- name: telemetry.fastf1.raw
+- name: telemetry.raw
   partitions: 3
   replication_factor: 3
   config:
@@ -8,16 +8,10 @@
     retention.ms: 604800000
     min.insync.replicas: 2
 
-- name: telemetry.fastf1.lap_summary
+- name: race.events
   partitions: 3
   replication_factor: 3
   config:
-    cleanup.policy: compact
-    min.cleanable.dirty.ratio: 0.1
-
-- name: telemetry.fastf1.session_markers
-  partitions: 1
-  replication_factor: 3
-  config:
     cleanup.policy: delete
-    retention.ms: 604800000       
+    retention.ms: 604800000
+    min.insync.replicas: 2       
