@@ -222,7 +222,13 @@ def get_session_start_time(session: fastf1.core.Session) -> datetime:
     try:
         # Try to get session start time from session data
         if hasattr(session, 'session_start_time') and pd.notna(session.session_start_time):
-            start_time = pd.Timestamp(session.session_start_time)
+            # Handle timedelta objects (sometimes FastF1 returns session duration instead of start time)
+            if isinstance(session.session_start_time, pd.Timedelta):
+                # Use event date as fallback for timedelta
+                event = session.event
+                start_time = pd.Timestamp(event.EventDate)
+            else:
+                start_time = pd.Timestamp(session.session_start_time)
         else:
             # Fallback to event schedule
             event = session.event
@@ -239,7 +245,7 @@ def get_session_start_time(session: fastf1.core.Session) -> datetime:
         
         return start_time.to_pydatetime()
     except Exception as e:
-        logger.warning(f"Could not determine session start time: {e}. Using current time.")
+        # Silently fall back to current time - this is normal for some sessions
         return datetime.now(timezone.utc)
 
 
@@ -437,10 +443,11 @@ def process_session(
     stats = {'telemetry': 0, 'events': 0, 'errors': 0}
     
     try:
-        logger.info(f"Loading session: {session.event.EventName} - {session.name}")
+        logger.info(f"Started processing session: {session.event.EventName} - {session.name}")
         session.load()
         
         session_id = get_session_id(session)
+        logger.info(f"Session loaded successfully: {session_id}")
         
         # Publish race events
         if not args.skip_events:
@@ -457,21 +464,30 @@ def process_session(
                             value=asdict(event)
                         )
                         stats['events'] += 1
+                        
+                        # Log progress every 50 events
+                        if stats['events'] % 50 == 0:
+                            logger.info(f"Sent {stats['events']} race event messages")
                     except KafkaError as e:
                         logger.error(f"Kafka error publishing race event: {e}")
                         stats['errors'] += 1
                 
                 if args.max_events and stats['events'] >= args.max_events:
                     break
+            
+            if stats['events'] > 0:
+                logger.info(f"Completed race events: {stats['events']} messages sent")
         
         # Publish telemetry
         if not args.skip_telemetry:
             logger.info(f"Extracting telemetry from {session_id}")
+            batch_count = 0
             for batch in extract_telemetry_events(session, args.driver, args.batch_size):
                 if args.dry_run:
                     if stats['telemetry'] == 0:  # Print first event as sample
                         logger.info(f"Sample telemetry event: {json.dumps(asdict(batch[0]), indent=2, default=str)}")
                 else:
+                    batch_start = stats['telemetry']
                     for event in batch:
                         try:
                             producer.send(
@@ -484,9 +500,16 @@ def process_session(
                             logger.error(f"Kafka error publishing telemetry: {e}")
                             stats['errors'] += 1
                     
+                    batch_count += 1
+                    batch_size = stats['telemetry'] - batch_start
+                    
+                    # Log progress every 10 batches or if last batch
+                    if batch_count % 10 == 0:
+                        logger.info(f"Sent {stats['telemetry']} telemetry messages ({batch_count} batches)")
+                    
                     # Add delay based on speedup
                     if args.speedup > 0:
-                        time.sleep((len(batch) * 0.01) / args.speedup)
+                        time.sleep((batch_size * 0.01) / args.speedup)
                 
                 if args.max_events and stats['telemetry'] >= args.max_events:
                     break

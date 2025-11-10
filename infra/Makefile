@@ -51,7 +51,7 @@ switch-account:
 	rm -f terraform.tfstate terraform.tfstate.backup
 	rm -f .terraform/terraform.tfstate 2>/dev/null || true
 	rm -f plan.tfplan 2>/dev/null || true
-	@echo "✓ Clean complete!"
+	@echo "[OK] Clean complete!"
 	@echo ""
 	@echo "Running preflight to discover resources in current account..."
 	@$(MAKE) preflight
@@ -60,7 +60,7 @@ switch-account:
 	terraform init -reconfigure
 	@echo ""
 	@echo "================================================"
-	@echo "✓ Account switch complete!"
+	@echo "[OK] Account switch complete!"
 	@echo "Next step: terraform plan"
 	@echo "================================================"
 

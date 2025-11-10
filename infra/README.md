@@ -1,18 +1,18 @@
 # F1 Streaming Graph Infrastructure
 
-Production-grade Terraform infrastructure for a Kafka → Spark streaming pipeline with intelligent AWS resource discovery.
+Production-grade Terraform infrastructure for a Kafka -> Spark streaming pipeline with intelligent AWS resource discovery.
 
 ## Architecture
 
 ```
-┌─────────────────┐      ┌────────────────────────────┐
-│  Amazon MSK     │─────▶│  EMR Cluster (Spark/YARN)  │
-│  (Kafka, IAM)   │      │  • Bronze/Silver/Gold jobs │
-└─────────────────┘      └─────────────┬──────────────┘
-                                       │
-                                ┌──────▼──────┐
-                                │   Amazon S3 │  (raw / artifacts / checkpoints)
-                                └─────────────┘
++-----------------+      +----------------------------+
+|  Amazon MSK     |----->|  EMR Cluster (Spark/YARN)  |
+|  (Kafka, IAM)   |      |  - Bronze/Silver/Gold jobs |
++-----------------+      +-------------+--------------+
+                                       |
+                                +------v------+
+                                |   Amazon S3 |  (raw / artifacts / checkpoints)
+                                +-------------+
 
 Private subnets host MSK brokers and EMR core nodes.
 Public subnets provide outbound access via a NAT Gateway.
@@ -26,7 +26,7 @@ All data in transit uses TLS and KMS CMKs protect data at rest.
 - **VPC & Networking**: 3 AZ VPC with private/public subnets, NAT Gateway, Internet Gateway
 - **Amazon MSK**: 3-broker Kafka cluster with IAM authentication and TLS encryption
 - **EMR Cluster (EC2)**: One master, two core nodes running Spark/YARN for Structured Streaming
-- **S3 Buckets**: raw landing zone, artifacts (silver/gold), checkpoints – all SSE-KMS encrypted with deterministic 6-char suffix for global uniqueness (override via `bucket_name_suffix`)
+- **S3 Buckets**: raw landing zone, artifacts (silver/gold), checkpoints - all SSE-KMS encrypted with deterministic 6-char suffix for global uniqueness (override via `bucket_name_suffix`)
 - **SSH Key Pair**: Imports your local public key (or reuses an existing AWS key pair) for EMR SSH access
 - **KMS Keys**: Dedicated CMKs for data and MSK encryption
 - **Security Groups**: Least-privilege rules for MSK and EMR cluster traffic
@@ -40,9 +40,9 @@ All data in transit uses TLS and KMS CMKs protect data at rest.
 
 ### Significant Costs (Production)
 - **NAT Gateway**: ~$32/month + data transfer ($0.045/GB)
-- **MSK**: kafka.m7g.large × 3 brokers = ~$500/month + storage
+- **MSK**: kafka.m7g.large x 3 brokers = ~$500/month + storage
 - **EMR Cluster**: EC2 instances (master + core) billed hourly (plus storage/EBS)
-- **VPC Interface Endpoints**: ~$7/endpoint/month × 3 = ~$21/month
+- **VPC Interface Endpoints**: ~$7/endpoint/month x 3 = ~$21/month
 
 ### Development Cost Optimization
 For dev/test environments, use single NAT Gateway and smaller MSK instances:
@@ -116,7 +116,7 @@ The `preflight.py` script intelligently discovers existing AWS resources to avoi
 1. **VPC Detection**:
    - Checks `VPC_ID` environment variable first
    - Searches for VPCs tagged with project name
-   - Falls back to largest non-default VPC with ≥2 private subnets
+   - Falls back to largest non-default VPC with >=2 private subnets
    - Prefers creating NEW VPC over reusing default VPC (safety)
 
 2. **Subnet Classification**:
@@ -231,24 +231,24 @@ aws sts get-caller-identity
 
 ```
 .
-├── README.md                          # This file
-├── Makefile                           # Build automation
-├── preflight.py                       # AWS resource discovery script
-├── versions.tf                        # Terraform version constraints
-├── providers.tf                       # AWS provider configuration
-├── variables.tf                       # Input variables
-├── outputs.tf                         # Output values
-├── main.tf                            # Main infrastructure orchestration
-├── examples/
-│   └── terraform.tfvars.example      # Example variable values
-└── modules/
-    ├── vpc/                          # VPC, subnets, NAT, IGW
-    ├── s3/                           # S3 buckets with encryption
-    ├── kms/                          # KMS keys for encryption
-    ├── sg/                           # Security groups
-    ├── msk/                          # Amazon MSK cluster
-    ├── emr-cluster/                 # EMR Spark cluster (EC2)
-    └── vpc-endpoints/                # VPC endpoints
++-- README.md                          # This file
++-- Makefile                           # Build automation
++-- preflight.py                       # AWS resource discovery script
++-- versions.tf                        # Terraform version constraints
++-- providers.tf                       # AWS provider configuration
++-- variables.tf                       # Input variables
++-- outputs.tf                         # Output values
++-- main.tf                            # Main infrastructure orchestration
++-- examples/
+|   +-- terraform.tfvars.example      # Example variable values
++-- modules/
+    +-- vpc/                          # VPC, subnets, NAT, IGW
+    +-- s3/                           # S3 buckets with encryption
+    +-- kms/                          # KMS keys for encryption
+    +-- sg/                           # Security groups
+    +-- msk/                          # Amazon MSK cluster
+    +-- emr-cluster/                 # EMR Spark cluster (EC2)
+    +-- vpc-endpoints/                # VPC endpoints
 ```
 
 ## Makefile Targets

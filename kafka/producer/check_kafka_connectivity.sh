@@ -35,40 +35,40 @@ for b in "${BROKERS[@]}"; do
   echo -n "DNS lookup... "
   if nslookup "$host" > /dev/null 2>&1; then
     IP=$(nslookup "$host" | grep -A1 "Name:" | grep "Address:" | awk '{print $2}' | head -1)
-    echo "✓ Resolved to: $IP"
+    echo "[OK] Resolved to: $IP"
   elif host "$host" > /dev/null 2>&1; then
     IP=$(host "$host" | grep "has address" | awk '{print $4}' | head -1)
-    echo "✓ Resolved to: $IP"
+    echo "[OK] Resolved to: $IP"
   else
-    echo "✗ FAILED - Cannot resolve $host"
+    echo "[FAIL] FAILED - Cannot resolve $host"
     continue
   fi
   
   # TCP connectivity
   echo -n "TCP connection to $host:$port... "
   if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host/$port" 2>/dev/null; then
-    echo "✓ SUCCESS"
+    echo "[OK] SUCCESS"
   elif command -v nc > /dev/null 2>&1; then
     if nc -zv -w 3 "$host" "$port" > /dev/null 2>&1; then
-      echo "✓ SUCCESS (via nc)"
+      echo "[OK] SUCCESS (via nc)"
     else
-      echo "✗ FAILED - Cannot connect to $host:$port"
+      echo "[FAIL] FAILED - Cannot connect to $host:$port"
       echo "  This usually means:"
       echo "  - Security group blocking port $port"
       echo "  - Network routing issue"
       echo "  - Broker is down"
     fi
   else
-    echo "✗ Cannot test - no nc command available"
+    echo "[FAIL] Cannot test - no nc command available"
   fi
   
   # Test with telnet if available
   if command -v telnet > /dev/null 2>&1; then
     echo -n "Telnet test... "
     if timeout 3 telnet "$host" "$port" </dev/null 2>&1 | grep -q "Connected"; then
-      echo "✓ Connected"
+      echo "[OK] Connected"
     else
-      echo "✗ Failed"
+      echo "[FAIL] Failed"
     fi
   fi
   

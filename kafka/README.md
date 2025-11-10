@@ -5,27 +5,27 @@ This directory houses the client-side components used to interact with the Amazo
 ## Architecture
 
 ```
-FastF1 API → producer.py → MSK Kafka
-                              ├─ telemetry.raw (car telemetry)
-                              └─ race.events (race control events)
-                                      ↓
+FastF1 API -> producer.py -> MSK Kafka
+                              +- telemetry.raw (car telemetry)
+                              +- race.events (race control events)
+                                      v
                               Bronze Spark Job (EMR)
-                                      ↓
+                                      v
                                   S3 Bronze Layer (Delta/Parquet)
 ```
 
 ## Repo Layout
 ```
 kafka/
-├── README.md                 # This document
-├── requirements.txt          # Python dependencies for admin + producer tooling
-├── topics.yaml               # Declarative topic definitions
-├── scripts/
-│   └── create_topics.py      # Helper to create topics in MSK
-└── producer/
-    ├── producer.py           # Comprehensive F1 data producer
-    ├── run_producer.sh       # Helper script with Terraform integration
-    └── README.md             # Detailed producer documentation
++-- README.md                 # This document
++-- requirements.txt          # Python dependencies for admin + producer tooling
++-- topics.yaml               # Declarative topic definitions
++-- scripts/
+|   +-- create_topics.py      # Helper to create topics in MSK
++-- producer/
+    +-- producer.py           # Comprehensive F1 data producer
+    +-- run_producer.sh       # Helper script with Terraform integration
+    +-- README.md             # Detailed producer documentation
 ```
 
 ## Prerequisites

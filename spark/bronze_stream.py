@@ -62,6 +62,7 @@ def build_kafka_reader_options(args: argparse.Namespace) -> Dict[str, str]:
         "kafka.bootstrap.servers": args.bootstrap_servers,
         "startingOffsets": args.starting_offsets,
         "failOnDataLoss": "false",
+        "maxOffsetsPerTrigger": "100000",  # Limit to 100K messages per batch
     }
     if args.kafka_option:
         options.update(option_dict(args.kafka_option))
@@ -88,11 +89,18 @@ def read_kafka_topic(
         "timestamp AS kafka_timestamp",
     ).withColumn("ingested_at", current_timestamp())
 
+    # Parse JSON and extract fields
+    with_payload = raw_df.withColumn("payload", from_json(col("kafka_value"), schema))
+    
+    # For debugging: create a view to check parsing
     parsed_df = (
-        raw_df.withColumn("payload", from_json(col("kafka_value"), schema))
+        with_payload
         .select("payload.*", "kafka_key", "topic", "partition", "offset", "kafka_timestamp", "ingested_at")
         .withColumn("bronze_topic", lit(topic))
     )
+    
+    # Don't filter out NULLs yet - let's see what we get
+    # .filter(col("session_id").isNotNull())
 
     return parsed_df, raw_df
 
@@ -122,6 +130,7 @@ def main() -> None:
         checkpoint_path = os.path.join(args.checkpoint_base, sanitized)
         writer = (
             df.writeStream.outputMode("append")
+            .trigger(processingTime="30 seconds")
             .option("checkpointLocation", checkpoint_path)
         )
         writer = writer.format(args.write_format)

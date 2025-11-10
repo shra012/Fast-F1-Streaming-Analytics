@@ -21,7 +21,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Tuple
 
 import yaml
-from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
 from kafka import errors as kafka_errors
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.oauth.abstract import AbstractTokenProvider
@@ -42,6 +41,16 @@ class IAMSaslTokenProvider(AbstractTokenProvider):
     """Adapter that generates OAUTHBEARER tokens for MSK via the IAM signer."""
 
     def __init__(self, cluster_arn: str, region: str) -> None:
+        try:
+            from aws_msk_iam_sasl_signer import (  # type: ignore import-not-found
+                MSKAuthTokenProvider,
+            )
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "aws-msk-iam-sasl-signer is required when --auth-mode=iam. "
+                "Install it with `pip install aws-msk-iam-sasl-signer`."
+            ) from exc
+
         self._cluster_arn = cluster_arn
         self._signer = MSKAuthTokenProvider(region_name=region)
 
@@ -147,7 +156,7 @@ def ensure_topics(
         effective_rf = topic.replication_factor
         if broker_count and effective_rf > broker_count:
             print(
-                f"  • Adjusting replication factor for {topic.name} from "
+                f"  - Adjusting replication factor for {topic.name} from "
                 f"{effective_rf} to {broker_count} (available brokers: {broker_count})."
             )
             effective_rf = broker_count
@@ -165,7 +174,7 @@ def ensure_topics(
 
         if min_insync_val is not None and min_insync_val > effective_rf:
             print(
-                f"  • Adjusting min.insync.replicas for {topic.name} from "
+                f"  - Adjusting min.insync.replicas for {topic.name} from "
                 f"{min_insync_val} to {effective_rf}."
             )
             topic_configs["min.insync.replicas"] = str(effective_rf)
@@ -189,12 +198,12 @@ def ensure_topics(
             raise SystemExit(f"Failed to create topics: {exc}") from exc
         else:
             for topic in new_topics:
-                print(f"  ✔ Created {topic.name}")
+                print(f"  [OK] Created {topic.name}")
 
     if skipped:
         print("Skipped existing topics:")
         for name in skipped:
-            print(f"  • {name}")
+            print(f"  - {name}")
 
 
 def main() -> None:

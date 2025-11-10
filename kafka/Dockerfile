@@ -17,4 +17,4 @@ COPY producer ./producer
 RUN pip install --no-cache-dir -r requirements.txt \
  && mkdir -p "${FASTF1_CACHE_DIR}"
 
-ENTRYPOINT ["python", "producer/simple_producer.py"]
+ENTRYPOINT ["python", "producer/producer.py"]

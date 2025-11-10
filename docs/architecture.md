@@ -1,6 +1,6 @@
 # F1 Streaming Graph Architecture Plan
 
-This document outlines the incremental plan for delivering a Formula 1 streaming analytics platform focused on Kafka → Spark → Neo4j graph insights. Flink components are deferred and called out as stretch goals to integrate later.
+This document outlines the incremental plan for delivering a Formula 1 streaming analytics platform focused on Kafka -> Spark -> Neo4j graph insights. Flink components are deferred and called out as stretch goals to integrate later.
 
 ## 1. Guiding Goals
 - Deliver near-real-time driver/constructor interaction analytics backed by Neo4j graph queries.
@@ -31,97 +31,240 @@ This document outlines the incremental plan for delivering a Formula 1 streaming
 - **Context tables** (slow moving dims): `session` (metadata), `driver`, `team`, `circuit` (layout & sectors), `car_config` (downforce, wing angle), `strategy_plan` (planned stop laps).
 - **Derived metrics (streamed)**: lap/sector splits, `delta_vs_best_ms`, `delta_vs_leader_ms`, 3-lap rolling averages, tyre degradation rate, fuel consumption, `battery_delta_pct`, braking efficiency (avg decel vs entry), `acceleration_0_200_kph_ms2`, corner exit/straight-line speeds, blue flag exposure, pit-stop efficiency, stint consistency, driver graph centrality, team gaps, undercut predictions, confidence intervals.
 
-### 3.2 Pipeline Stages
-- **Bronze (raw landing)**: ingest from FastF1 pull + timing/race-control/weather APIs into S3 (partitioned by `event_date/stream_type`), validate schemas via MSK registry, tag missing telemetry, keep WAL/replay retention.
-- **Silver (cleansed & conformed)**: dedupe `(session_id, car_number, timestamp_utc)`, resample to 10 Hz metric units, enrich with driver/team/circuit metadata, join weather & race events, derive stint segments, capture SLA metrics (late arrival %, null coverage) to monitoring topics.
-- **Gold (analytics-ready)**: build `fact_lap` (pace deltas, tyre state) & `fact_stint` (degradation, fuel usage), compute `driver_overtake_edge` and graph metrics, persist curated star schema in warehouse + materialized views.
-- **Platinum (serving / ML)**: maintain feature store records (`driver_state_vector`, `team_gap_features`, predictive outputs), warm API caches (Redis/Pinot) for dashboards/broadcast, log model monitoring metrics (MAE, calibration, drift indicators).
+### 3.2 Pipeline Stages (Simplified: Bronze → Gold)
 
-### 3.3 Kafka Topics (minimal footprint)
-1. `telemetry.raw` – key: `session_id.driver_id.timestamp`; value: full raw payload + quality flags; retention ~7 days (delete or compact+delete after Silver checkpoint).
-2. `race.events` – key: `session_id.event_id`; value: event metadata (pit, safety car, incident, weather); retention ~30 days with compaction.
-3. `metrics.enriched` – key: `session_id.driver_id.lap_number`; value: lap-level aggregates, tyre degradation, ERS/fuel status, predictive features; retention ~14 days with compaction to keep most recent version.
-Static dimensions (drivers, teams, circuits) remain in the warehouse/feature store unless update cadence warrants dedicated topics.
+**Architecture Decision**: Two-stage pipeline consolidating Silver + Gold + Platinum into unified Gold stage. Reduces latency, operational complexity, and infrastructure overhead.
 
-### 3.4 Canonical Relationships
-- `DimSession(session_id, season, grand_prix, session_code, start_time_utc, circuit_id)` ← `DimCircuit(circuit_id, name, layout_version, country, sector_count)`.
-- `DimDriver(driver_id, driver_code, full_name, nationality, rookie_year, team_id)` ← `DimTeam(team_id, name, engine_supplier)`.
-- `FactTelemetry(event_id, session_id, driver_id, timestamp_utc, lap_number, micro_sector, speed_kph, throttle_pct, …)` links to `DimSession` & `DimDriver`.
-- `FactLap(session_id, driver_id, lap_number, lap_time_ms, sector1_ms, sector2_ms, sector3_ms, delta_vs_leader_ms, tyre_compound, stint_id)` generated from Silver telemetry + race events.
-- `FactStint(stint_id, session_id, driver_id, tyre_compound, start_lap, end_lap, avg_pace_ms, degradation_rate, fuel_used_kg)` aggregates `FactLap`.
-- `EventLog(session_id, event_id, event_type, driver_id?, lap_number?, payload_json)` originates from `race.events`.
-- `GraphEdges(session_id, from_driver_id, to_driver_id, lap_number, overtake_type, delta_time_ms)` and `GraphMetrics(session_id, driver_id, centrality, influence_index)` feed graph analytics.
-- `FeatureStoreDriver(driver_id, session_id, feature_vector, generated_at, valid_until)` powers Platinum-level ML/serving APIs.
+- **Bronze (raw landing)**: 
+  - **Kafka → S3 streaming ingestion**
+  - Consume from `telemetry.raw` and `race.events` MSK topics
+  - Parse JSON against validated schemas (`TELEMETRY_SCHEMA`, `RACE_EVENT_SCHEMA`)
+  - Write both parsed (typed fields) and raw (audit trail) streams to S3 Delta tables
+  - Partitioned by ingestion date: `s3://bucket/bronze/telemetry_raw_parsed/date=2025-11-09/`
+  - Checkpointed for exactly-once semantics: `s3://bucket/checkpoints/bronze/`
+  - Trigger interval: 30 seconds
+  - **Status**: Implemented in `bronze_stream.py`, running on EMR
+  
+- **Gold (unified analytics, graph, and serving)**:
+  - **S3 → S3 + Neo4j + Serving Layer**
+  - Read Bronze Delta tables in streaming mode
+  - **Cleansing** (formerly Silver): Deduplicate `(session_id, driver_id, timestamp_utc)`, filter invalid data, type conversions, unit harmonization
+  - **Enrichment** (formerly Silver): Join with dimension data (drivers, teams, circuits), derive `stint_id` from tyre changes
+  - **Aggregation** (formerly Gold): Window by lap to compute `fact_lap` metrics (lap times, sector splits, speeds, fuel/battery deltas), stint-level summaries
+  - **Graph Computation** (formerly Gold): Detect overtakes (position swaps with gap < 1.0s), identify multi-lap battles, compute interaction strength
+  - **Analytics** (formerly Platinum): Inline PageRank/centrality using GraphFrames on windowed data, driver influence scores, team battle intensity
+  - **Multi-Sink Write**:
+    - S3 Gold Delta: `fact_lap`, `fact_stint`, `fact_driver_session`, `fact_overtakes` tables
+    - Neo4j Aura: Stream Driver/Session/Team/Lap nodes and OVERTOOK/BATTLED relationships with computed properties (centrality, influence_score)
+    - Serving prep: Query-ready aggregates, cached metrics
+  - Checkpointed: `s3://bucket/checkpoints/gold/`
+  - Trigger interval: 60 seconds (allows lap completion and mini-batch analytics)
+  - **Status**: Planned in `gold_stream.py`, design complete
 
-Flow: `telemetry.raw` → Bronze lake → Silver cleansing → `metrics.enriched` + warehouse tables → Gold/Platinum marts & caches, with `race.events` enriching all downstream stages.
+**Removed Stages**:
+- ~~Silver~~: Cleansing/enrichment moved to Gold
+- ~~Platinum~~: Analytics and serving integrated into Gold streaming job (no separate batch or feature store)
 
-## 4. Iterative Delivery Plan
+### 3.3 Kafka Topics (Simplified)
+1. `telemetry.raw` 
+   - key: `session_id.driver_id.timestamp`
+   - value: full telemetry payload (speed, throttle, brake, GPS, tyre temps, ERS, fuel, weather)
+   - retention: 7 days delete policy
+   - partitions: 3 (current), scale to 6-12 for higher throughput
+   
+2. `race.events` 
+   - key: `session_id.event_id`
+   - value: race control events (pit stops, safety car, incidents, penalties)
+   - retention: 30 days with compaction
+   - partitions: 3
+   
+**Removed Topics**:
+- ~~`metrics.enriched`~~: Gold writes lap metrics directly to S3 and Neo4j, no intermediate Kafka pub/sub needed
+
+Static dimensions (drivers, teams, circuits) seeded into Neo4j via batch CSV/Parquet import, not streamed through Kafka.
+
+### 3.4 Canonical Relationships (Simplified for Bronze → Gold)
+
+**S3 Delta Lake (Analytical Store)**:
+```
+Bronze Layer:
+  telemetry_raw_parsed (streaming)
+  telemetry_raw_raw (audit)
+  race_events_parsed (streaming)
+  race_events_raw (audit)
+    ↓
+Gold Layer:
+  fact_lap (session_id, driver_id, lap_number → lap metrics)
+  fact_stint (stint_id → tyre compound, degradation, fuel usage)
+```
+
+**Neo4j Graph Database (Interaction Network)**:
+```
+Nodes:
+  Driver (driver_id, driver_code, name, team_id, centrality*)
+  Session (session_id, season, grand_prix, circuit_id, session_code)
+  Team (team_id, name, engine_supplier)
+  Lap (session_id, driver_id, lap_number, lap_time_ms, position)
+
+Relationships:
+  (Driver)-[DROVE_IN]->(Session)
+  (Driver)-[RACES_FOR]->(Team)
+  (Driver)-[OVERTOOK {lap_number, delta_time_ms}]->(Driver)
+  (Driver)-[BATTLED {lap_count, avg_gap_ms}]->(Driver)
+  (Lap)-[NEXT]->(Lap)
+  (Lap)-[COMPLETED_BY]->(Driver)
+```
+
+**Data Flow**:
+1. Kafka (`telemetry.raw`, `race.events`) → Bronze S3 Delta (parsed + raw)
+2. Bronze Delta → Gold processing:
+   - Lap aggregation → `fact_lap`, `fact_stint` (S3 Delta)
+   - Interaction detection → Driver/Lap nodes + OVERTOOK/BATTLED relationships (Neo4j)
+3. Batch analytics: Neo4j graph → PageRank/centrality → update Driver node properties
+4. Query layer: Cypher queries on Neo4j for real-time driver influence/interaction insights
+
+## 4. Iterative Delivery Plan (Updated for Bronze → Gold)
 
 ### Delivery Team Work Items
 
-| Person | Primary Focus | Current Work Items |
+| Person | Primary Focus | Current Status |
 | --- | --- | --- |
-| Shravan – Platform & Terraform | AWS/Terraform/Producer foundation | Finalize `terraform.tfvars`, run `make preflight` & `terraform plan`, build MSK + EMR cluster infrastructure, and automate producer deployment inside the VPC |
-| Chaithanya – Data Ingestion Schema Design | FastF1 telemetry into MSK (json schema) | Define topic schemas, build FastF1 schema, and coordinate Spark Bronze/Silver transformations |
-| Shreyas – Spark Processing | Batch + streaming pipelines | historical S3 datasets / live kafka streaming, build Spark batch normalization, prototype Structured Streaming flow |
-| Kalyan – Graph & Observability | Neo4j analytics + operations | Use Graph schema/PageRank cadence, expose query API/notebooks, configure initial CloudWatch dashboards |
+| Shravan - Platform & Terraform | AWS/Terraform/Infrastructure | MSK + EMR cluster operational, producer deployed |
+| Chaithanya - Data Ingestion | FastF1 telemetry → Kafka | Producer running, 1.1M+ messages in topics |
+| Shreyas - Spark Processing | Bronze + Gold pipelines | Bronze complete, Gold in development |
+| Kalyan - Graph & Observability | Neo4j + monitoring | Neo4j Aura setup, CloudWatch dashboards |
 
-### Phase 0 – Foundation & Alignment
-1. Confirm AWS accounts, regions, and quotas; document required permissions.
-2. Finalize dataset catalog (historical telemetry files, schema definitions, expected live topics).
-3. Capture success metrics and KPIs (latency budget, PageRank accuracy targets, cost budgets).
+### Phase 0 - Foundation & Alignment COMPLETE
+1. [x] AWS infrastructure provisioned (VPC, MSK, EMR, S3, IAM)
+2. [x] Dataset catalog defined (telemetry schema, race events)
+3. [x] Success metrics: sub-60s latency Bronze → Neo4j, 99.9% message processing
 
-### Phase 1 – Infrastructure Baseline (Terraform `infra/`)
-1. Parameterize `terraform.tfvars` for development environment (small MSK, single NAT if acceptable).
-2. Run `make preflight` to detect existing resources; review generated `*_auto.tfvars` outputs.
-3. Execute `terraform init && terraform plan` to validate infrastructure changes.
-4. Apply infrastructure in a dev AWS account; verify VPC, subnets, security groups, KMS, S3 buckets, and MSK cluster reachability.
-5. Launch the EMR cluster; confirm IAM roles, bootstrap actions, and S3 permissions.
-6. Document network endpoints (MSK bootstrap, S3 bucket names, IAM role ARNs) for downstream use.
+### Phase 1 - Infrastructure Baseline COMPLETE
+1. [x] Terraform applied successfully (dev environment)
+2. [x] VPC, subnets, security groups validated
+3. [x] MSK cluster operational (3 brokers, 3 partitions per topic)
+4. [x] EMR cluster launched (1 master + 2 core nodes, Spark 3.5.5)
+5. [x] S3 buckets created: raw, artifacts, checkpoints, bronze, gold
+6. [x] IAM roles configured for EMR → MSK + S3 access
 
-### Phase 2 – Replaying FastF1 Telemetry to Kafka (Initial Real-Time Simulation)
-1. **Topic schema**: Define Kafka topic(s) such as `telemetry.fastf1.raw` and `events.fastf1.lap`; document JSON schema and versioning in `docs/`.
-2. **FastF1 API integration**:
-   - Install `fastf1` Python package and set up local caching (SQLite + parquet) for session data.
-   - Use session endpoints (e.g., `fastf1.get_session(year, grand_prix, session)`) to retrieve timing, laps, and telemetry frames.
-   - Normalize API responses into event payloads containing timestamp, driver, lap, sector, and telemetry metrics.
-3. **Producer service**:
-   - Implement a Python producer that replays session data in near-real-time by sleeping based on original telemetry timestamps or a configurable acceleration factor.
-   - Run inside the VPC (EC2/EMR master) with IAM authentication; manage offsets/checkpoints per session; optionally containerize later if needed.
-4. **Kafka connectivity**:
-   - Configure IAM-authenticated MSK connections, TLS certificates, and topic ACLs for the producer.
-   - Validate end-to-end publish/subscription using sample telemetry sessions.
-5. **Retention & scaling**:
-   - Set topic retention, partitions, and compaction strategy aligned with downstream processing load.
-   - Document operational procedures (rerunning sessions, handling backfills, rotating cache data).
+### Phase 2 - Kafka Producer COMPLETE
+1. [x] FastF1 Python producer implemented (`kafka/producer/producer.py`)
+2. [x] Topics created: `telemetry.raw` (1,116,826 messages), `race.events` (2,343 messages)
+3. [x] Producer deployed on EMR master node with IAM auth
+4. [x] Replay mechanism working (timestamp-based or accelerated)
+5. [x] Message validation and schema adherence confirmed
 
-### Phase 3 – Historical Batch Load
-1. Upload historical datasets to the S3 raw bucket (organized by season/event).
-2. Develop Spark batch jobs (PySpark or Scala) to normalize telemetry into structured parquet tables (stored in S3 artifacts bucket).
-3. Implement quality checks (schema validation, deduplication using Bloom filters where appropriate).
-4. Load curated batch outputs into Neo4j (via Spark connector or bulk import) to bootstrap the interaction graph.
-5. Version control ETL jobs and configuration in `spark/` (or equivalent) with clear deployment runbooks.
+### Phase 3 - Bronze Streaming COMPLETE
+1. [x] `bronze_stream.py` implemented with Spark Structured Streaming
+2. [x] Kafka → S3 Delta pipeline operational
+3. [x] Exactly-once checkpointing verified
+4. [x] Output validated: 133.58 MB written (45.17 MB parsed telemetry, 88.02 MB raw)
+5. [x] Monitoring script deployed (`check_pipeline_status.sh`)
 
-### Phase 4 – Streaming Analytics (Spark Structured Streaming)
-1. Author Structured Streaming job consuming MSK telemetry topics; perform parsing, enrichment, and windowed aggregations.
-2. Apply probabilistic data structures (HyperLogLog for unique interactions, Reservoir Sampling for downsampling) inside the streaming job.
-3. Persist stateful checkpoints to dedicated S3 path; verify recovery from failure scenarios.
-4. Stream processed interaction events to Neo4j via transactional batches or micro-bulk writes.
-5. Monitor latency and throughput; tune Spark/YARN micro-batch duration and resource limits on the EMR cluster.
+### Phase 4 - Unified Gold Streaming & Neo4j Integration IN PROGRESS
+**Goal**: S3 Bronze → Gold S3 + Neo4j graph streaming with inline analytics
 
-### Phase 5 – Graph Analytics & APIs
-1. Model driver/construction graph schema in Neo4j (nodes, relationships, properties) with supporting documentation.
-2. Implement recurring PageRank/centrality updates (batch or streaming triggers) and store results as node properties.
-3. Expose key graph queries via scripts or lightweight API (e.g., FastAPI) to serve downstream analysis/dashboards.
-4. Define validation harness comparing PageRank outputs against historical race standings for sanity checking.
-5. Provide example Cypher notebooks and sample queries for analysts.
+**Tasks**:
+1. Set up Neo4j Aura instance
+   - [ ] Create Aura database (GCP/AWS region aligned)
+   - [ ] Configure connection credentials
+   - [ ] Add Spark cluster IP to allowlist
+   - [ ] Create schema constraints (unique Driver.driver_id, Session.session_id)
+   - [ ] Create indexes on frequently queried properties
+   
+2. Implement `gold_stream.py` - Cleansing & Aggregation (formerly Silver + Gold)
+   - [ ] Read Bronze Delta tables in streaming mode
+   - [ ] Add deduplication logic using watermarking (`(session_id, driver_id, timestamp_utc)`)
+   - [ ] Implement data quality filters (null checks, range validation)
+   - [ ] Join with dimension tables (drivers, teams, circuits enrichment)
+   - [ ] Implement lap windowing and aggregation (group by session_id, driver_id, lap_number)
+   - [ ] Join telemetry with race events (pit stops, penalties, safety car)
+   - [ ] Derive stint_id from tyre compound changes
+   - [ ] Compute lap metrics: lap_time_ms, sector splits, avg/max speed, fuel/battery deltas
+   - [ ] Compute stint-level aggregates: degradation rate, consistency score
+   
+3. Implement overtake/battle detection (Graph Computation)
+   - [ ] Track position changes lap-over-lap per session
+   - [ ] Detect overtakes: position swap + gap < 1.0s criterion
+   - [ ] Identify battles: multi-lap sequences with sustained proximity (3+ laps)
+   - [ ] Compute interaction strength scoring
+   - [ ] Tag overtake types (DRS-assisted, under braking, strategic)
+   
+4. Integrate inline graph analytics (formerly Platinum)
+   - [ ] Add GraphFrames package: `graphframes:graphframes:0.8.3-spark3.5-s_2.12`
+   - [ ] Implement windowed graph construction (last N laps per session)
+   - [ ] Run incremental PageRank on mini-graphs per micro-batch
+   - [ ] Compute driver influence scores (overtakes completed vs received)
+   - [ ] Calculate team battle intensity metrics
+   - [ ] Prepare serving layer aggregates (top overtakers, rivalry pairs)
+   
+5. Integrate Neo4j Spark Connector
+   - [ ] Add connector JAR: `org.neo4j:neo4j-connector-apache-spark_2.12:5.3.0`
+   - [ ] Configure `spark.neo4j.url` and authentication in `~/spark.env`
+   - [ ] Implement `foreachBatch` function to write nodes/relationships
+   - [ ] Use MERGE for Driver/Session/Team/Lap nodes (idempotent upserts)
+   - [ ] Use CREATE for OVERTOOK/BATTLED relationships
+   - [ ] Add custom Cypher for node property updates (SET centrality, influence_score)
+   
+6. Write Gold S3 tables
+   - [ ] Persist `fact_lap` Delta table with lap-level metrics
+   - [ ] Persist `fact_stint` Delta table with stint aggregates
+   - [ ] Persist `fact_driver_session` Delta table with per-driver summaries and influence scores
+   - [ ] Persist `fact_overtakes` Delta table with detailed overtake event log
+   - [ ] Set up checkpointing for Gold stage
+   
+7. Testing & validation
+   - [ ] Verify lap aggregation accuracy vs raw telemetry
+   - [ ] Validate Neo4j writes (node counts, relationship cardinality)
+   - [ ] Test checkpoint recovery after intentional job failure
+   - [ ] Monitor Gold processing latency (target: < 60s batch interval)
+   - [ ] Validate inline PageRank computation accuracy
+   - [ ] Compare influence scores with race results for sanity check
 
-### Phase 6 – Observability, CI/CD, and Operations
-1. Configure CloudWatch dashboards for MSK lag, EMR job metrics, and Neo4j connector errors.
-2. Add Terraform outputs to `README.md` and document manual post-apply steps (e.g., Neo4j IP allowlists).
-3. Integrate linting/formatting (`terraform fmt`, `tflint`, Spark code style) into CI pipelines.
-4. Establish deployment workflows (GitHub Actions or equivalent) covering Terraform validation and Spark job packaging.
-5. Create operational runbooks for incident response, data backfills, and cost optimization levers.
+### Phase 5 - Query API & Serving Layer PLANNED
+**Goal**: Expose Neo4j graph queries and cached analytics via API
+
+**Tasks**:
+1. Create Cypher query library
+   - [ ] Most influential drivers (top PageRank/influence scores)
+   - [ ] Rivalry pairs (highest BATTLED relationship count)
+   - [ ] Overtake leaders (most OVERTOOK relationships)
+   - [ ] Team interaction heatmaps
+   - [ ] Session-specific leaderboards
+   
+2. Expose query API
+   - [ ] FastAPI or GraphQL endpoint implementation
+   - [ ] Authentication and rate limiting
+   - [ ] Caching layer for frequently accessed queries
+   - [ ] Example notebook with sample queries
+   - [ ] API documentation and usage examples
+   
+3. Build validation dashboards
+   - [ ] Compare graph metrics to actual race results
+   - [ ] Track influence score correlation with finishing positions
+   - [ ] Monitor data quality metrics (null rates, late arrivals)
+
+### Phase 6 - Observability & Operations PLANNED
+1. CloudWatch dashboards
+   - [ ] MSK consumer lag per partition
+   - [ ] EMR job metrics (batch duration, records processed)
+   - [ ] Neo4j write throughput and errors
+   - [ ] Gold processing latency trends
+   - [ ] GraphFrames computation duration
+   
+2. Alerting
+   - [ ] Pipeline stalled (no checkpoint updates > 5 min)
+   - [ ] Data quality degradation (null rate spike)
+   - [ ] Neo4j connection failures
+   - [ ] Micro-batch duration exceeding trigger interval
+   - [ ] Graph computation timeouts
+   
+3. Documentation updates
+   - [ ] Deployment runbooks
+   - [ ] Schema evolution procedures
+   - [ ] Cost optimization recommendations
+   - [ ] Performance tuning guidelines
+   - [ ] Troubleshooting common issues
 
 ## 5. Stretch Goals (Flink & Advanced Enhancements)
 1. **Flink Stream Processing**

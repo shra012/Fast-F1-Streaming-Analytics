@@ -264,7 +264,21 @@ resource "aws_security_group_rule" "emr_to_msk" {
   protocol                 = "tcp"
   source_security_group_id = module.emr_cluster[0].master_security_group_id
   security_group_id        = module.msk[0].security_group_id
-  description              = "Allow EMR cluster to connect to MSK (plaintext)"
+  description              = "Allow EMR master to connect to MSK (plaintext)"
+
+  depends_on = [module.msk, module.emr_cluster]
+}
+
+resource "aws_security_group_rule" "emr_workers_to_msk" {
+  count = var.create_msk && var.create_emr_cluster ? 1 : 0
+
+  type                     = "ingress"
+  from_port                = 9092
+  to_port                  = 9092
+  protocol                 = "tcp"
+  source_security_group_id = module.emr_cluster[0].core_security_group_id
+  security_group_id        = module.msk[0].security_group_id
+  description              = "Allow EMR workers to connect to MSK (plaintext)"
 
   depends_on = [module.msk, module.emr_cluster]
 }

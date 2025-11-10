@@ -5,10 +5,10 @@ Comprehensive producer for streaming F1 telemetry and race event data to Kafka t
 ## Architecture
 
 ```
-FastF1 API → producer.py → MSK Kafka
-                              ├─ telemetry.raw
-                              └─ race.events
-                                      ↓
+FastF1 API -> producer.py -> MSK Kafka
+                              +- telemetry.raw
+                              +- race.events
+                                      v
                               Bronze Spark Job
 ```
 

@@ -39,7 +39,7 @@ def test_kafka_connection(bootstrap_servers, topics=None):
             request_timeout_ms=10000,  # 10 second timeout
             api_version_auto_timeout_ms=5000,
         )
-        logger.info("✓ Producer created successfully")
+        logger.info("[OK] Producer created successfully")
         
         logger.info("")
         logger.info("Fetching cluster metadata...")
@@ -62,16 +62,16 @@ def test_kafka_connection(bootstrap_servers, topics=None):
                 # This will force metadata update for the topic
                 partitions = producer.partitions_for(topic)
                 if partitions:
-                    logger.info(f"  ✓ Topic '{topic}' exists with {len(partitions)} partition(s): {partitions}")
+                    logger.info(f"  [OK] Topic '{topic}' exists with {len(partitions)} partition(s): {partitions}")
                 else:
-                    logger.warning(f"  ✗ Topic '{topic}' not found in cluster metadata")
+                    logger.warning(f"  [FAIL] Topic '{topic}' not found in cluster metadata")
                     logger.warning(f"    Available topics: {cluster.topics()}")
             except Exception as e:
-                logger.error(f"  ✗ Error getting metadata for topic '{topic}': {e}")
+                logger.error(f"  [FAIL] Error getting metadata for topic '{topic}': {e}")
         
         logger.info("")
         logger.info("="*80)
-        logger.info("✓ Kafka connection test PASSED")
+        logger.info("[OK] Kafka connection test PASSED")
         logger.info("="*80)
         
         producer.close()
@@ -80,7 +80,7 @@ def test_kafka_connection(bootstrap_servers, topics=None):
     except KafkaError as e:
         logger.error("")
         logger.error("="*80)
-        logger.error("✗ Kafka connection test FAILED")
+        logger.error("[FAIL] Kafka connection test FAILED")
         logger.error("="*80)
         logger.error(f"Error: {e}")
         logger.error("")
@@ -98,7 +98,7 @@ def test_kafka_connection(bootstrap_servers, topics=None):
     except Exception as e:
         logger.error("")
         logger.error("="*80)
-        logger.error("✗ Unexpected error")
+        logger.error("[FAIL] Unexpected error")
         logger.error("="*80)
         logger.error(f"Error: {e}")
         import traceback
