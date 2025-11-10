@@ -82,7 +82,6 @@ EMR_MASTER_DNS=$(tf_output emr_cluster_master_public_dns)
 EMR_CLUSTER_ID=$(tf_output emr_cluster_id)
 KAFKA_BOOTSTRAP=$(tf_output msk_bootstrap_brokers)
 SPARK_BRONZE_BASE=$(tf_output spark_bronze_base_uri)
-SPARK_SILVER_BASE=$(tf_output spark_silver_base_uri)
 SPARK_GOLD_BASE=$(tf_output spark_gold_base_uri)
 SPARK_CHECKPOINT_BASE=$(tf_output s3_checkpoint_uri)
 SPARK_ARTIFACT_BUCKET=$(tf_output s3_artifacts_bucket)
@@ -135,8 +134,7 @@ KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
 SPARK_ARTIFACT_BUCKET=${SPARK_ARTIFACT_BUCKET}
 SPARK_ARTIFACT_PREFIX=${ARTIFACT_PREFIX}
 SPARK_BRONZE_BASE=${SPARK_BRONZE_BASE}
-SPARK_SILVER_BASE=${SPARK_SILVER_BASE}
-SPARK_GOLD_BASE=${SPARK_GOLD_BASE}
+SPARK_GOLD_BASE=${SPARK_GOLD_BASE:-}
 SPARK_CHECKPOINT_BASE=${SPARK_CHECKPOINT_BASE}
 EMR_KEY_PAIR_NAME=${EMR_KEY_PAIR_NAME}
 EOF

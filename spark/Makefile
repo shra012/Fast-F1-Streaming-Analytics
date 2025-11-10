@@ -20,8 +20,12 @@ upload: package
 	@test -n "$(S3_PREFIX)" || (echo "Set S3_PREFIX (e.g. s3://fastf1-artifacts/spark) before running upload"; exit 1)
 	aws s3 cp $(PACKAGE_ZIP) $(S3_PREFIX)/spark_package.zip
 	aws s3 cp bronze_stream.py $(S3_PREFIX)/bronze_stream.py
-	aws s3 cp silver_stream.py $(S3_PREFIX)/silver_stream.py
-	aws s3 cp gold_stream.py   $(S3_PREFIX)/gold_stream.py
+	@if [ -f gold_stream.py ]; then \
+		aws s3 cp gold_stream.py $(S3_PREFIX)/gold_stream.py; \
+		echo "Uploaded gold_stream.py"; \
+	else \
+		echo "Note: gold_stream.py not found (not yet implemented)"; \
+	fi
 
 clean:
 	rm -rf $(DIST_DIR)

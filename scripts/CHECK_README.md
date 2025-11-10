@@ -24,29 +24,30 @@ source spark/emr_job.env
 
 This sets:
 - `EMR_MASTER_DNS`: EMR cluster master node DNS
-- `SSH_KEY`: Path to SSH private key
 - `KAFKA_BOOTSTRAP`: MSK broker addresses
 - `S3_RAW_BUCKET`: Raw data bucket name
 - `S3_CHECKPOINTS_BUCKET`: Checkpoint bucket name
 - `S3_ARTIFACTS_BUCKET`: Artifacts bucket name
 
+**Note**: All commands below assume you have sourced `spark/emr_job.env` and are using the default SSH key at `~/.ssh/id_rsa`. If your SSH key is located elsewhere, replace `~/.ssh/id_rsa` with your key path.
+
 ### Deploy Script to EMR
 
 Copy the monitoring script to the EMR master node:
 ```bash
-scp -i ${SSH_KEY} scripts/check_pipeline_status.sh hadoop@${EMR_MASTER_DNS}:~/
+scp -i ~/.ssh/id_rsa scripts/check_pipeline_status.sh hadoop@${EMR_MASTER_DNS}:~/
 ```
 
 Make it executable:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'chmod +x check_pipeline_status.sh'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'chmod +x check_pipeline_status.sh'
 ```
 
 ### Create Environment File on EMR
 
 Create `~/spark.env` on the EMR master node with required variables:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} "cat > ~/spark.env << 'EOF'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} "cat > ~/spark.env << 'EOF'
 export KAFKA_BOOTSTRAP=\"${KAFKA_BOOTSTRAP}\"
 export SPARK_BRONZE_BASE=\"s3://${S3_RAW_BUCKET}/bronze/\"
 export SPARK_CHECKPOINT_BASE=\"s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/\"
@@ -64,7 +65,7 @@ EOF"
 
 Run the standard health check:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh'
 ```
 
 **Output includes:**
@@ -78,7 +79,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh'
 
 Include logs, partition-level metrics, and error detection:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --detailed'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --detailed'
 ```
 
 **Additional information:**
@@ -91,7 +92,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --detaile
 
 Interactive cleanup utility to reset checkpoints and/or output:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --reset'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --reset'
 ```
 
 **Interactive menu options:**
@@ -114,7 +115,7 @@ These commands can be run directly from your local machine after sourcing `spark
 
 List all running YARN applications:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'yarn application -list'
 ```
 
 **What it checks:** Verifies if bronze_stream Spark job is running  
@@ -124,7 +125,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list'
 
 Get detailed status of the bronze_stream application:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}" | xargs -I {} yarn application -status {}'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}" | xargs -I {} yarn application -status {}'
 ```
 
 **What it checks:** Application start time, resource usage, and current state  
@@ -134,7 +135,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "br
 
 List all Kafka topics:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/bin/kafka-topics.sh --bootstrap-server $(echo $KAFKA_BOOTSTRAP | cut -d, -f1) --list'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/bin/kafka-topics.sh --bootstrap-server $(echo $KAFKA_BOOTSTRAP | cut -d, -f1) --list'
 ```
 
 **What it checks:** Verifies telemetry.raw and race.events topics exist  
@@ -144,7 +145,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/
 
 Get total message count for telemetry.raw:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/bin/kafka-run-class.sh kafka.tools.GetOffsetShell --broker-list $(echo $KAFKA_BOOTSTRAP | cut -d, -f1) --topic telemetry.raw | awk -F: "{sum+=\$3} END {print \"telemetry.raw: \" sum \" messages\"}"'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/bin/kafka-run-class.sh kafka.tools.GetOffsetShell --broker-list $(echo $KAFKA_BOOTSTRAP | cut -d, -f1) --topic telemetry.raw | awk -F: "{sum+=\$3} END {print \"telemetry.raw: \" sum \" messages\"}"'
 ```
 
 **What it checks:** Total messages available across all partitions  
@@ -152,14 +153,14 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/
 
 For race.events:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/bin/kafka-run-class.sh kafka.tools.GetOffsetShell --broker-list $(echo $KAFKA_BOOTSTRAP | cut -d, -f1) --topic race.events | awk -F: "{sum+=\$3} END {print \"race.events: \" sum \" messages\"}"'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/bin/kafka-run-class.sh kafka.tools.GetOffsetShell --broker-list $(echo $KAFKA_BOOTSTRAP | cut -d, -f1) --topic race.events | awk -F: "{sum+=\$3} END {print \"race.events: \" sum \" messages\"}"'
 ```
 
 ### 5. Check Kafka Partition Details
 
 Show per-partition message counts:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/bin/kafka-run-class.sh kafka.tools.GetOffsetShell --broker-list $(echo $KAFKA_BOOTSTRAP | cut -d, -f1) --topic telemetry.raw'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/bin/kafka-run-class.sh kafka.tools.GetOffsetShell --broker-list $(echo $KAFKA_BOOTSTRAP | cut -d, -f1) --topic telemetry.raw'
 ```
 
 **What it checks:** Message distribution across partitions  
@@ -169,7 +170,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && ~/kafka-tools/
 
 Read first 3 messages from telemetry.raw:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} '~/kafka-tools/bin/kafka-console-consumer.sh --bootstrap-server REDACTED --topic telemetry.raw --from-beginning --max-messages 3'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} '~/kafka-tools/bin/kafka-console-consumer.sh --bootstrap-server REDACTED --topic telemetry.raw --from-beginning --max-messages 3'
 ```
 
 **What it checks:** Message format and content validity  
@@ -179,7 +180,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} '~/kafka-tools/bin/kafka-console-cons
 
 List checkpoint directories in S3:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && aws s3 ls ${SPARK_CHECKPOINT_BASE}bronze/'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && aws s3 ls ${SPARK_CHECKPOINT_BASE}bronze/'
 ```
 
 **What it checks:** Streaming queries are maintaining state  
@@ -189,7 +190,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && aws s3 ls ${SP
 
 Count batches processed per stream:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && for stream in telemetry_raw-parsed telemetry_raw-raw race_events-parsed race_events-raw; do echo "$stream: $(aws s3 ls ${SPARK_CHECKPOINT_BASE}bronze/$stream/commits/ 2>/dev/null | grep -v PRE | wc -l) batches"; done'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && for stream in telemetry_raw-parsed telemetry_raw-raw race_events-parsed race_events-raw; do echo "$stream: $(aws s3 ls ${SPARK_CHECKPOINT_BASE}bronze/$stream/commits/ 2>/dev/null | grep -v PRE | wc -l) batches"; done'
 ```
 
 **What it checks:** Number of successfully committed batches  
@@ -199,7 +200,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && for stream in 
 
 List output directories:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && aws s3 ls ${SPARK_BRONZE_BASE}'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && aws s3 ls ${SPARK_BRONZE_BASE}'
 ```
 
 **What it checks:** Data is being written to S3  
@@ -209,7 +210,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && aws s3 ls ${SP
 
 Show file counts and total sizes:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && for stream in telemetry_raw-parsed telemetry_raw-raw race_events-parsed race_events-raw; do echo "=== $stream ==="; aws s3 ls ${SPARK_BRONZE_BASE}$stream/ --recursive --summarize 2>/dev/null | tail -2; done'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && for stream in telemetry_raw-parsed telemetry_raw-raw race_events-parsed race_events-raw; do echo "=== $stream ==="; aws s3 ls ${SPARK_BRONZE_BASE}$stream/ --recursive --summarize 2>/dev/null | tail -2; done'
 ```
 
 **What it checks:** Volume of data written per stream  
@@ -219,7 +220,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && for stream in 
 
 Show last 50 lines of application logs:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}" | xargs -I {} yarn logs -applicationId {} -log_files stderr -size -5000 2>/dev/null | tail -50'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}" | xargs -I {} yarn logs -applicationId {} -log_files stderr -size -5000 2>/dev/null | tail -50'
 ```
 
 **What it checks:** Recent processing activity and warnings  
@@ -229,7 +230,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "br
 
 Search for "falling behind" warnings:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}" | xargs -I {} yarn logs -applicationId {} -log_files stderr -size -10000 2>/dev/null | grep "falling behind" | tail -10'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}" | xargs -I {} yarn logs -applicationId {} -log_files stderr -size -10000 2>/dev/null | grep "falling behind" | tail -10'
 ```
 
 **What it checks:** If processing is slower than 30-second trigger interval  
@@ -239,7 +240,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "br
 
 Search for ERROR entries:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}" | xargs -I {} yarn logs -applicationId {} -log_files stderr -size -10000 2>/dev/null | grep -E "ERROR|Exception" | grep -v "WARN\|RuntimeWarning" | tail -10'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}" | xargs -I {} yarn logs -applicationId {} -log_files stderr -size -10000 2>/dev/null | grep -E "ERROR|Exception" | grep -v "WARN\|RuntimeWarning" | tail -10'
 ```
 
 **What it checks:** Application errors and exceptions  
@@ -249,7 +250,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "br
 
 Get human-readable start time:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'APP_ID=$(yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}"); yarn application -status $APP_ID 2>/dev/null | grep "Start-Time"'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'APP_ID=$(yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \$1}"); yarn application -status $APP_ID 2>/dev/null | grep "Start-Time"'
 ```
 
 **What it checks:** When the Spark job was started  
@@ -259,7 +260,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'APP_ID=$(yarn application -list | gr
 
 Verify environment variables are set:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && echo "KAFKA_BOOTSTRAP=$KAFKA_BOOTSTRAP"; echo "SPARK_BRONZE_BASE=$SPARK_BRONZE_BASE"; echo "SPARK_CHECKPOINT_BASE=$SPARK_CHECKPOINT_BASE"'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && echo "KAFKA_BOOTSTRAP=$KAFKA_BOOTSTRAP"; echo "SPARK_BRONZE_BASE=$SPARK_BRONZE_BASE"; echo "SPARK_CHECKPOINT_BASE=$SPARK_CHECKPOINT_BASE"'
 ```
 
 **What it checks:** Required variables are properly configured  
@@ -269,7 +270,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && echo "KAFKA_BO
 
 Read checkpoint offset file to see messages consumed:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && aws s3 cp ${SPARK_CHECKPOINT_BASE}bronze/telemetry_raw-parsed/offsets/0 - 2>/dev/null | tail -1'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && aws s3 cp ${SPARK_CHECKPOINT_BASE}bronze/telemetry_raw-parsed/offsets/0 - 2>/dev/null | tail -1'
 ```
 
 **What it checks:** How many Kafka messages have been consumed  
@@ -279,7 +280,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && aws s3 cp ${SP
 
 Download and inspect a sample output file:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && FILE=$(aws s3 ls ${SPARK_BRONZE_BASE}telemetry_raw-parsed/ --recursive 2>/dev/null | grep ".parquet" | grep -v "_delta_log" | head -1 | awk "{print \$4}"); aws s3 cp s3://$(echo ${SPARK_BRONZE_BASE} | sed "s|s3://||")$FILE /tmp/sample.parquet && python3 -c "import pyarrow.parquet as pq; t=pq.read_table(\"/tmp/sample.parquet\"); print(f\"Rows: {t.num_rows}\"); print(f\"Columns: {t.num_columns}\")"'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && FILE=$(aws s3 ls ${SPARK_BRONZE_BASE}telemetry_raw-parsed/ --recursive 2>/dev/null | grep ".parquet" | grep -v "_delta_log" | head -1 | awk "{print \$4}"); aws s3 cp s3://$(echo ${SPARK_BRONZE_BASE} | sed "s|s3://||")$FILE /tmp/sample.parquet && python3 -c "import pyarrow.parquet as pq; t=pq.read_table(\"/tmp/sample.parquet\"); print(f\"Rows: {t.num_rows}\"); print(f\"Columns: {t.num_columns}\")"'
 ```
 
 **What it checks:** Actual data in output files  
@@ -289,7 +290,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && FILE=$(aws s3 
 
 List cluster nodes and resources:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn node -list -all'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'yarn node -list -all'
 ```
 
 **What it checks:** Available compute resources  
@@ -299,7 +300,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn node -list -all'
 
 Get Spark UI URL:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \"Application ID: \" \$1 \"\nTracking URL: \" \$9}"'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | head -1 | awk "{print \"Application ID: \" \$1 \"\nTracking URL: \" \$9}"'
 ```
 
 **What it checks:** Where to access Spark UI  
@@ -309,7 +310,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "br
 
 Terminate all bronze_stream applications:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | awk "{print \$1}" | xargs -I {} yarn application -kill {}'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'yarn application -list | grep -E "bronze|fastf1" | awk "{print \$1}" | xargs -I {} yarn application -kill {}'
 ```
 
 **What it does:** Stops running Spark streaming jobs  
@@ -324,10 +325,10 @@ To copy the entire check_pipeline_status.sh script and run it directly on EMR:
 ### Copy Script to EMR
 ```bash
 # Copy the script
-scp -i ${SSH_KEY} scripts/check_pipeline_status.sh hadoop@${EMR_MASTER_DNS}:~/
+scp -i ~/.ssh/id_rsa scripts/check_pipeline_status.sh hadoop@${EMR_MASTER_DNS}:~/
 
 # Make executable
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'chmod +x check_pipeline_status.sh'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'chmod +x check_pipeline_status.sh'
 ```
 
 ### Run on EMR Machine
@@ -335,7 +336,7 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'chmod +x check_pipeline_status.sh'
 SSH to EMR and run directly:
 ```bash
 # SSH to EMR
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS}
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS}
 
 # Run basic check
 ./check_pipeline_status.sh
@@ -352,13 +353,13 @@ ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS}
 Run the script remotely without SSH login:
 ```bash
 # Basic check
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh'
 
 # Detailed check
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --detailed'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --detailed'
 
 # Automated reset (option 2 - full cleanup)
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --reset' << 'EOF'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --reset' << 'EOF'
 2
 yes
 EOF
@@ -493,7 +494,7 @@ export S3_RAW_BUCKET="$(terraform output -raw s3_raw_bucket)"
 export S3_CHECKPOINTS_BUCKET="$(terraform output -raw s3_checkpoints_bucket)"
 EOF
 
-scp -i ${SSH_KEY} /tmp/spark.env hadoop@${EMR_MASTER_DNS}:~/spark.env
+scp -i ~/.ssh/id_rsa /tmp/spark.env hadoop@${EMR_MASTER_DNS}:~/spark.env
 ```
 
 ---
@@ -506,7 +507,7 @@ scp -i ${SSH_KEY} /tmp/spark.env hadoop@${EMR_MASTER_DNS}:~/spark.env
 
 **Check:**
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'yarn application -list'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'yarn application -list'
 ```
 
 The script searches for applications containing "bronze" or "fastf1" in the name. If your application has a different name, update the grep pattern in `check_yarn_applications()` function.
@@ -517,7 +518,7 @@ The script searches for applications containing "bronze" or "fastf1" in the name
 
 **Verify:**
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && echo $KAFKA_BOOTSTRAP'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'source ~/spark.env && echo $KAFKA_BOOTSTRAP'
 ```
 
 Should print comma-separated MSK broker addresses. If empty, recreate `~/spark.env` as shown above.
@@ -528,7 +529,7 @@ Should print comma-separated MSK broker addresses. If empty, recreate `~/spark.e
 
 **Verify:**
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} 'aws s3 ls s3://${S3_RAW_BUCKET}/'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} 'aws s3 ls s3://${S3_RAW_BUCKET}/'
 ```
 
 If this fails, check the EMR instance profile IAM role has `s3:ListBucket` and `s3:GetObject` permissions on the raw and checkpoint buckets.
@@ -629,7 +630,7 @@ Log status checks with timestamps:
 
 Run checks without SSH'ing to EMR:
 ```bash
-ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --detailed'
+ssh -i ~/.ssh/id_rsa hadoop@${EMR_MASTER_DNS} './check_pipeline_status.sh --detailed'
 ```
 
 ### Conditional Reset

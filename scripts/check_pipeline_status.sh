@@ -2,7 +2,7 @@
 #
 # Pipeline Status Checker
 # Runs directly on EMR master node to monitor Kafka, Spark, and S3
-# Usage: ./check_pipeline_status.sh [--detailed] [--reset]
+# Usage: ./check_pipeline_status.sh [--detailed] [--reset] [--help]
 #
 
 set -euo pipefail
@@ -19,14 +19,87 @@ NC='\033[0m' # No Color
 DETAILED_MODE=false
 RESET_MODE=false
 
+# Show help function
+show_help() {
+  echo -e "${CYAN}========================================${NC}"
+  echo -e "${CYAN}F1 Streaming Pipeline Status Checker${NC}"
+  echo -e "${CYAN}========================================${NC}"
+  echo
+  echo -e "${YELLOW}DESCRIPTION:${NC}"
+  echo "  Comprehensive monitoring tool for the F1 streaming pipeline."
+  echo "  Checks YARN applications, Kafka topics, Spark checkpoints, S3 output,"
+  echo "  and detects potential data processing issues."
+  echo
+  echo -e "${YELLOW}USAGE:${NC}"
+  echo "  ./check_pipeline_status.sh [OPTIONS]"
+  echo
+  echo -e "${YELLOW}OPTIONS:${NC}"
+  echo -e "  ${GREEN}--help${NC}       Show this help message and exit"
+  echo -e "  ${GREEN}--detailed${NC}   Enable detailed mode with additional diagnostics"
+  echo "               - Shows partition-level Kafka message counts"
+  echo "               - Displays recent streaming log entries"
+  echo "               - Shows tracking URLs and timestamps"
+  echo "               - Provides error detection from YARN logs"
+  echo
+  echo -e "  ${GREEN}--reset${NC}      Interactive pipeline reset mode"
+  echo "               - Option 1: Clean checkpoints only (reprocess data)"
+  echo "               - Option 2: Clean checkpoints and output (fresh start)"
+  echo "               - Kills running Spark applications"
+  echo "               - Allows recovery from data processing issues"
+  echo
+  echo -e "${YELLOW}EXAMPLES:${NC}"
+  echo -e "  ${CYAN}# Basic status check${NC}"
+  echo "  ./check_pipeline_status.sh"
+  echo
+  echo -e "  ${CYAN}# Detailed status with logs and partition info${NC}"
+  echo "  ./check_pipeline_status.sh --detailed"
+  echo
+  echo -e "  ${CYAN}# Interactive reset pipeline${NC}"
+  echo "  ./check_pipeline_status.sh --reset"
+  echo
+  echo -e "${YELLOW}WHAT IT CHECKS:${NC}"
+  echo "  ✓ YARN applications (bronze_stream job status)"
+  echo "  ✓ Kafka topics and message counts"
+  echo "  ✓ Spark streaming checkpoints and batch progress"
+  echo "  ✓ S3 bronze layer output (files and storage size)"
+  echo "  ✓ Data processing efficiency (Kafka vs S3 comparison)"
+  echo "  ✓ Recent streaming activity and errors"
+  echo
+  echo -e "${YELLOW}PREREQUISITES:${NC}"
+  echo "  - Must be run on EMR master node"
+  echo "  - Requires ~/spark.env with environment variables"
+  echo "  - Kafka tools installed at ~/kafka-tools (optional but recommended)"
+  echo
+  echo -e "${YELLOW}HEALTH SCORE:${NC}"
+  echo "  The script calculates a health score (0-4) based on:"
+  echo "  - Bronze stream application running"
+  echo "  - Checkpoints present"
+  echo "  - Output data present"
+  echo "  - Kafka topics available"
+  echo
+  echo -e "${YELLOW}EXIT CODES:${NC}"
+  echo "  0 - Success"
+  echo "  1 - Missing spark.env or other errors"
+  echo
+  exit 0
+}
+
 # Parse arguments
 for arg in "$@"; do
   case $arg in
+    --help|-h)
+      show_help
+      ;;
     --detailed)
       DETAILED_MODE=true
       ;;
     --reset)
       RESET_MODE=true
+      ;;
+    *)
+      echo -e "${RED}Unknown option: $arg${NC}"
+      echo "Use --help for usage information"
+      exit 1
       ;;
   esac
 done
