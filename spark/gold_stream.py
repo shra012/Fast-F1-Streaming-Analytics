@@ -134,16 +134,18 @@ def write_to_neo4j(df: DataFrame, spark, cypher_query: str, args: argparse.Names
         if row_count == 0:
             return
         
-        # Configure Neo4j connection
-        spark.conf.set("spark.neo4j.url", args.neo4j_uri)
-        spark.conf.set("spark.neo4j.authentication.type", "basic")
-        spark.conf.set("spark.neo4j.authentication.basic.username", args.neo4j_username)
-        spark.conf.set("spark.neo4j.authentication.basic.password", args.neo4j_password)
-        spark.conf.set("spark.neo4j.database", args.neo4j_database)
-        
-        # Write using Neo4j connector
+        # Write using Neo4j connector with options
         # The connector expects the DataFrame columns to match the Cypher query parameters
-        df.write.format("org.neo4j.spark.DataSource").mode("Overwrite").option("query", cypher_query).save()
+        (df.write
+            .format("org.neo4j.spark.DataSource")
+            .mode("Overwrite")
+            .option("url", args.neo4j_uri)
+            .option("authentication.type", "basic")
+            .option("authentication.basic.username", args.neo4j_username)
+            .option("authentication.basic.password", args.neo4j_password)
+            .option("database", args.neo4j_database)
+            .option("query", cypher_query)
+            .save())
         print(f"✓ Wrote {row_count} rows to Neo4j")
     except Exception as e:
         print(f"✗ Error writing to Neo4j: {str(e)}")
@@ -635,43 +637,69 @@ def process_event_batch(
 
         print(f"[Batch {batch_id}] Building overtake edges...")
         overtake_edges = build_interaction_edges(cleaned, "overtake")
-        publish_to_kafka(overtake_edges, args.overtake_topic, kafka_options)
-        if args.write_to_neo4j and overtake_edges is not None:
-            # Parse JSON payload to extract overtake data
-            overtake_edges_for_neo4j = cleaned.filter(F.col("event_type") == "overtake").select(
-                F.col("session_id").alias("sessionId"),
-                F.col("attacker_id").alias("attackerId"),
-                F.col("defender_id").alias("defenderId"),
-                F.col("lap_number").alias("lapNumber"),
-                F.col("delta_time_ms").alias("deltaTimeMs"),
-                F.col("event_ts").alias("eventTs"),
-            )
-            write_to_neo4j(
-                overtake_edges_for_neo4j,
-                spark,
-                "MATCH (a:Driver {driverId: event.attackerId}) MATCH (d:Driver {driverId: event.defenderId}) MERGE (a)-[r:OVERTOOK]->(d) SET r += event",
-                args,
-            )
+        if overtake_edges is not None:
+            overtake_count = overtake_edges.count()
+            print(f"[Batch {batch_id}] Found {overtake_count} overtake interactions")
+            if overtake_count > 0:
+                publish_to_kafka(overtake_edges, args.overtake_topic, kafka_options)
+                if args.write_to_neo4j:
+                    # Extract data for Neo4j OVERTAKE relationships
+                    overtake_for_neo4j = cleaned.filter(F.lower(F.col("event_type")) == "overtake").withColumn(
+                        "interaction",
+                        F.when(
+                            F.col("payload").isNotNull() & (F.col("payload") != ""),
+                            F.from_json("payload", INTERACTION_EVENT_PAYLOAD_SCHEMA)
+                        ).otherwise(F.struct(*[F.lit(None).cast(field.dataType).alias(field.name) for field in INTERACTION_EVENT_PAYLOAD_SCHEMA.fields]))
+                    ).select(
+                        F.coalesce(F.col("interaction.attacker_id"), F.col("interaction.driver_a_id"), F.col("driver_id")).alias("attackerId"),
+                        F.coalesce(F.col("interaction.defender_id"), F.col("interaction.driver_b_id")).alias("defenderId"),
+                        F.col("session_id").alias("sessionId"),
+                        F.col("event_id").alias("eventId"),
+                        F.coalesce(F.col("interaction.lap_number"), F.col("lap_number")).alias("lapNumber"),
+                        F.col("interaction.lap_count").alias("lapCount"),
+                        F.col("interaction.avg_gap_ms").alias("avgGapMs"),
+                        F.col("interaction.delta_time_ms").alias("deltaTimeMs"),
+                        F.col("event_ts_utc").alias("eventTs"),
+                    ).filter(F.col("attackerId").isNotNull() & F.col("defenderId").isNotNull())
+                    write_to_neo4j(
+                        overtake_for_neo4j,
+                        spark,
+                        "MATCH (attacker:Driver {driverId: event.attackerId}) MATCH (defender:Driver {driverId: event.defenderId}) MERGE (attacker)-[r:OVERTAKE]->(defender) SET r += event",
+                        args,
+                    )
         
         print(f"[Batch {batch_id}] Building battle edges...")
         battle_edges = build_interaction_edges(cleaned, "battle")
-        publish_to_kafka(battle_edges, args.battle_topic, kafka_options)
-        if args.write_to_neo4j and battle_edges is not None:
-            battle_edges_for_neo4j = cleaned.filter(F.col("event_type") == "battle").select(
-                F.col("session_id").alias("sessionId"),
-                F.col("attacker_id").alias("attackerId"),
-                F.col("defender_id").alias("defenderId"),
-                F.col("lap_number").alias("lapNumber"),
-                F.col("lap_count").alias("lapCount"),
-                F.col("avg_gap_ms").alias("avgGapMs"),
-                F.col("event_ts").alias("eventTs"),
-            )
-            write_to_neo4j(
-                battle_edges_for_neo4j,
-                spark,
-                "MATCH (a:Driver {driverId: event.attackerId}) MATCH (d:Driver {driverId: event.defenderId}) MERGE (a)-[r:BATTLED]->(d) SET r += event",
-                args,
-            )
+        if battle_edges is not None:
+            battle_count = battle_edges.count()
+            print(f"[Batch {batch_id}] Found {battle_count} battle interactions")
+            if battle_count > 0:
+                publish_to_kafka(battle_edges, args.battle_topic, kafka_options)
+                if args.write_to_neo4j:
+                    # Extract data for Neo4j BATTLE relationships
+                    battle_for_neo4j = cleaned.filter(F.lower(F.col("event_type")) == "battle").withColumn(
+                        "interaction",
+                        F.when(
+                            F.col("payload").isNotNull() & (F.col("payload") != ""),
+                            F.from_json("payload", INTERACTION_EVENT_PAYLOAD_SCHEMA)
+                        ).otherwise(F.struct(*[F.lit(None).cast(field.dataType).alias(field.name) for field in INTERACTION_EVENT_PAYLOAD_SCHEMA.fields]))
+                    ).select(
+                        F.coalesce(F.col("interaction.attacker_id"), F.col("interaction.driver_a_id"), F.col("driver_id")).alias("attackerId"),
+                        F.coalesce(F.col("interaction.defender_id"), F.col("interaction.driver_b_id")).alias("defenderId"),
+                        F.col("session_id").alias("sessionId"),
+                        F.col("event_id").alias("eventId"),
+                        F.coalesce(F.col("interaction.lap_number"), F.col("lap_number")).alias("lapNumber"),
+                        F.col("interaction.lap_count").alias("lapCount"),
+                        F.col("interaction.avg_gap_ms").alias("avgGapMs"),
+                        F.col("interaction.delta_time_ms").alias("deltaTimeMs"),
+                        F.col("event_ts_utc").alias("eventTs"),
+                    ).filter(F.col("attackerId").isNotNull() & F.col("defenderId").isNotNull())
+                    write_to_neo4j(
+                        battle_for_neo4j,
+                        spark,
+                        "MATCH (attacker:Driver {driverId: event.attackerId}) MATCH (defender:Driver {driverId: event.defenderId}) MERGE (attacker)-[r:BATTLE]->(defender) SET r += event",
+                        args,
+                    )
 
         cleaned.unpersist()
         print(f"[Batch {batch_id}] Event batch processing completed successfully")

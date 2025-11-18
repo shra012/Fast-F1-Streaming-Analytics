@@ -1,201 +1,106 @@
 # Spark Streaming Jobs
 
-The `spark/` directory contains two Structured Streaming applications that
-implement the **Bronze → Gold** processing pipeline for Formula 1 telemetry and Neo4j graph analytics:
+Two Structured Streaming jobs for the **Bronze → Gold** pipeline:
 
-| Stage  | Script               | Status | Purpose                                                                 |
-|--------|----------------------|--------|-------------------------------------------------------------------------|
-| Bronze | `bronze_stream.py`   | Running | **Kafka → S3**: Ingest raw telemetry & race events from MSK topics, parse JSON, write to Delta tables|
-| Gold   | `gold_stream.py`     | Running | **S3 → Kafka (Neo4j topics)**: Read Bronze, cleanse/aggregate, derive graph nodes/edges, publish to `graph.neo4j.*` topics for MSK Connect |
+| Stage  | Script               | Purpose                                                                 |
+|--------|----------------------|-------------------------------------------------------------------------|
+| Bronze | `bronze_stream.py`   | Kafka → S3 Delta: Ingest telemetry & race events from MSK topics|
+| Gold   | `gold_stream.py`     | S3 → Neo4j: Read Bronze Delta, derive graph nodes/edges, write to Neo4j + Kafka|
 
-**Architecture Decision**: Two-stage pipeline consolidating Silver + Gold + Platinum into unified Gold stage. 
+## Quick Start
 
-Gold stage responsibilities:
-- Cleansing and deduplication (formerly Silver)
-- Lap aggregation and stint detection (formerly Gold)
-- Graph computation with inline PageRank/centrality (formerly Platinum)
-- Multi-sink output: S3 Delta tables + Neo4j graph + serving layer prep
+### 1. Setup (one-time)
+```bash
+# From repo root
+./scripts/setup_all.sh
+```
 
-Each job accepts CLI arguments so they can run locally (Spark standalone) or on
-an EMR cluster (Spark on YARN). All paths default to S3-style URIs but can be overridden.
+This packages Spark code, uploads to S3, and creates `spark/emr_job.env` with all connection details.
 
-## Packaging
+### 2. SSH to EMR
+```bash
+ssh -i ~/.ssh/id_rsa hadoop@<EMR_MASTER_DNS>
+```
 
-Use the provided Makefile to bundle the `spark` package (all supporting modules)
-so the EMR cluster can import shared code:
+### 3. Start Bronze Stream (Kafka → S3)
+```bash
+source spark.env && nohup spark-submit \
+  --master yarn \
+  --deploy-mode client \
+  --num-executors 2 \
+  --executor-memory 4G \
+  --executor-cores 2 \
+  --driver-memory 4G \
+  --conf spark.streaming.stopGracefullyOnShutdown=true \
+  --packages io.delta:delta-spark_2.12:3.1.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
+  --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+  --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+  bronze_stream.py \
+    --bootstrap-servers "$KAFKA_BOOTSTRAP" \
+    --telemetry-topic telemetry.raw \
+    --events-topic race.events \
+    --output-base "$BRONZE_PATH" \
+    --checkpoint-base "$CHECKPOINT_PATH/bronze_stream" \
+    --starting-offsets latest \
+  > bronze_stream.log 2>&1 &
+```
+
+### 4. Start Gold Stream (S3 → Neo4j)
+```bash
+source spark.env && nohup spark-submit \
+  --master yarn \
+  --deploy-mode client \
+  --num-executors 2 \
+  --executor-memory 4G \
+  --executor-cores 2 \
+  --driver-memory 4G \
+  --conf spark.streaming.stopGracefullyOnShutdown=true \
+  --conf spark.sql.streaming.schemaInference=true \
+  --conf spark.sql.adaptive.enabled=true \
+  --packages io.delta:delta-spark_2.12:3.1.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.neo4j:neo4j-connector-apache-spark_2.12:5.3.1_for_spark_3,graphframes:graphframes:0.8.3-spark3.5-s_2.12 \
+  --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+  --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+  gold_stream.py \
+    --bronze-path "$BRONZE_PATH" \
+    --checkpoint-path "$CHECKPOINT_PATH/gold_stream" \
+    --kafka-bootstrap-servers "$KAFKA_BOOTSTRAP_SERVERS" \
+    --neo4j-uri "$NEO4J_URI" \
+    --neo4j-username "$NEO4J_USERNAME" \
+    --neo4j-password "$NEO4J_PASSWORD" \
+  > gold_stream.log 2>&1 &
+```
+
+### 5. Monitor
+```bash
+# Check logs
+tail -f bronze_stream.log
+tail -f gold_stream.log
+
+# Check YARN applications
+yarn application -list
+
+# Kill jobs
+yarn application -kill <application_id>
+```
+
+## Package & Deploy Updates
 
 ```bash
 cd spark
-make package                 # produces dist/spark_package.zip
+make package                                    # Creates dist/spark_package.zip
+aws s3 cp dist/spark_package.zip s3://<bucket>/spark/
+aws s3 cp bronze_stream.py s3://<bucket>/spark/
+aws s3 cp gold_stream.py s3://<bucket>/spark/
 ```
 
-The archive contains the entire `spark` package (including utils and schemas).
-Attach the zip via `--py-files` when invoking `spark-submit` on EMR.
-
-## Upload Artifacts
-
-Sync the build products to the artifacts bucket that Terraform wires for EMR:
+## Key Environment Variables (in spark.env)
 
 ```bash
-# Upload package + entrypoints to the artifacts bucket under a spark/ prefix
-make upload S3_PREFIX="s3://$(terraform -chdir=../infra output -raw s3_artifacts_bucket)/spark"
+KAFKA_BOOTSTRAP=b-1.msk.amazonaws.com:9092,...
+BRONZE_PATH=s3://bucket/bronze
+CHECKPOINT_PATH=s3://bucket/checkpoints
+NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=<password>
+SPARK_WRITE_TO_NEO4J=true
 ```
-
-Note the resulting URIs--they are referenced by the submission commands below.
-
-## Terraform Outputs Needed at Runtime
-
-After `terraform apply` finishes, capture the runtime values:
-
-```bash
-cd ../infra
-export EMR_MASTER_DNS=$(terraform output -raw emr_cluster_master_public_dns)
-export EMR_CLUSTER_ID=$(terraform output -raw emr_cluster_id)
-export KAFKA_BOOTSTRAP=$(terraform output -raw msk_bootstrap_brokers_sasl_iam)
-export SPARK_BRONZE_BASE=$(terraform output -raw spark_bronze_base_uri)
-export SPARK_GOLD_BASE=$(terraform output -raw spark_gold_base_uri)
-export SPARK_CHECKPOINT_BASE=$(terraform output -raw s3_checkpoint_uri)
-export SPARK_ARTIFACT_BUCKET=$(terraform output -raw s3_artifacts_bucket)
-export NEO4J_URI=$(terraform output -raw neo4j_uri)  # or manually set for Aura
-export NEO4J_USER="neo4j"
-export NEO4J_PASSWORD="<your-neo4j-password>"
-cd ../spark   # return to spark/ working tree for the commands below
-```
-
-These exports make it easy to copy-paste the commands below. MSK bootstrap and Neo4j credentials are sensitive--avoid printing to shared logs.
-
-> **Quick automation**: from the repo root run `./scripts/prepare_emr_job.sh`.
-> It packages the Spark code, uploads it to S3, generates `spark/emr_job.env`,
-> and prints ready-to-use `scp`, `ssh`, and `spark-submit` commands. The script
-> assumes `terraform apply` has completed successfully in `infra/`.
-
-## Running on the EMR Cluster
-
-1. **Upload artifacts** - ensure `spark_package.zip` and the entrypoint scripts exist under `s3://$SPARK_ARTIFACT_BUCKET/spark/`.
-
-2. **SSH to the master node** - use the DNS output and your key pair:
-   ```bash
-   ssh -i <path-to-key.pem> hadoop@$EMR_MASTER_DNS
-   ```
-
-3. **Submit the Bronze job** - from the EMR master (already running):
-   ```bash
-   spark-submit \
-     --master yarn \
-     --deploy-mode cluster \
-     --name bronze_stream \
-     --conf spark.dynamicAllocation.enabled=false \
-     --conf spark.executor.instances=2 \
-     --conf spark.executor.cores=2 \
-     --conf spark.executor.memory=4g \
-     --py-files s3://$SPARK_ARTIFACT_BUCKET/spark/spark_package.zip \
-     s3://$SPARK_ARTIFACT_BUCKET/spark/bronze_stream.py \
-     --bootstrap-servers "$KAFKA_BOOTSTRAP" \
-     --telemetry-topic telemetry.raw \
-     --events-topic race.events \
-     --output-base "$SPARK_BRONZE_BASE" \
-     --checkpoint-base "$SPARK_CHECKPOINT_BASE/bronze" \
-     --starting-offsets earliest
-   ```
-   
-   **Status**: Running successfully, 133.58 MB processed
-
-4. **Submit the Gold job** - derive Neo4j graph payloads and publish to Kafka:
-   ```bash
-   spark-submit \
-     --master yarn \
-     --deploy-mode cluster \
-     --name gold_stream \
-     --conf spark.dynamicAllocation.enabled=false \
-     --conf spark.executor.instances=2 \
-     --conf spark.executor.cores=2 \
-     --conf spark.executor.memory=4g \
-     --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,io.delta:delta-spark_2.12:3.1.0 \
-     --py-files s3://$SPARK_ARTIFACT_BUCKET/spark/spark_package.zip \
-     s3://$SPARK_ARTIFACT_BUCKET/spark/gold_stream.py \
-     --bootstrap-servers "$KAFKA_BOOTSTRAP" \
-     --bronze-base "$SPARK_BRONZE_BASE" \
-     --checkpoint-base "$SPARK_CHECKPOINT_BASE/gold" \
-     --kafka-sink-option security.protocol=SASL_SSL \
-     --kafka-sink-option sasl.mechanism=AWS_MSK_IAM \
-     --kafka-sink-option sasl.jaas.config='software.amazon.msk.auth.iam.IAMLoginModule required;' \
-     --kafka-sink-option sasl.client.callback.handler.class=software.amazon.msk.auth.iam.IAMClientCallbackHandler
-   ```
-   
-   This job emits Driver/Session/Team/Lap nodes and OVERTOOK/BATTLED relationships into Kafka topics that MSK Connect sinks into Neo4j Aura (see `docs/kafka-connect-plan.md`). Include the IAM/TLS options above if your MSK cluster enforces IAM authentication.
-   
-   > **Note**: The sample cluster runs just two core nodes, so dynamic allocation is disabled and the executor count is capped at two to avoid exhausting YARN containers. Increase these values only after scaling the EMR cluster.
-
-5. **Monitor execution** - leverage YARN CLI (`yarn application -list`, `yarn logs -applicationId ...`), the ResourceManager UI (tunnel via SSH), and CloudWatch log group `/aws/emr/<cluster-name>`.
-
-### Common Spark Arguments
-
-- `--bootstrap-servers` - MSK bootstrap string (Bronze job only, reads from Kafka)
-- `--starting-offsets` - choose `earliest` for backfills, `latest` for real-time only
-- `--write-format` / `--output-format` - defaults to `delta`. For pure Parquet, override and remove Delta jar
-- `--neo4j-uri` - Neo4j Aura connection URI (Gold job, e.g., `neo4j+s://xxxxx.databases.neo4j.io`)
-- `--neo4j-user` / `--neo4j-password` - Neo4j authentication credentials
-
-### Delta Lake Support
-
-Delta is enabled via `spark.sql.extensions` in code. When submitting to EMR,
-provide the appropriate package via `spark.jars.packages`. Example:
-`--conf spark.jars.packages=io.delta:delta-core_2.12:2.4.0`.
-
-### Neo4j Spark Connector & GraphFrames
-
-Gold job requires Neo4j Spark Connector and GraphFrames for inline analytics. Add via `--packages`:
-```bash
---packages org.neo4j:neo4j-connector-apache-spark_2.12:5.3.10_for_spark_3,graphframes:graphframes:0.8.3-spark3.5-s_2.12
-```
-
-Configure connection in code or via Spark conf:
-```python
-# Neo4j connection
-spark.conf.set("spark.neo4j.url", neo4j_uri)
-spark.conf.set("spark.neo4j.authentication.type", "basic")
-spark.conf.set("spark.neo4j.authentication.basic.username", neo4j_user)
-spark.conf.set("spark.neo4j.authentication.basic.password", neo4j_password)
-
-# GraphFrames for PageRank/centrality
-from graphframes import GraphFrame
-# Create graph from edges/vertices DataFrames
-# Run PageRank inline during micro-batch processing
-```
-
-**Gold Stage Analytics Features**:
-- Incremental centrality computation on windowed data (last N laps per session)
-- Inline PageRank using GraphFrames (avoids separate batch job)
-- Driver influence scores updated in real-time
-- Team battle intensity computed per micro-batch
-
-## Local Testing
-
-You can test locally with a standalone Spark installation:
-
-```bash
-spark-submit \
-  --packages io.delta:delta-core_2.12:2.4.0 \
-  --py-files spark/dist/spark_package.zip \
-  spark/bronze_stream.py \
-  --bootstrap-servers localhost:9092 \
-  --output-base ./tmp/bronze \
-  --checkpoint-base ./tmp/checkpoints/bronze \
-  --write-format delta
-```
-
-Update the output paths for the silver and gold jobs accordingly.
-
-## Configuration Summary
-
-| Env Var / Flag               | Description                                        | Default                              |
-|------------------------------|----------------------------------------------------|--------------------------------------|
-| `SPARK_BRONZE_BASE`        | Base S3 path for bronze sink                       | `s3://<raw-bucket>/bronze`           |
-| `SPARK_SILVER_BASE`         | Base S3 path for silver sink                       | `s3://<artifacts-bucket>/silver`     |
-| `SPARK_GOLD_BASE`           | Base S3 path for gold sink                         | `s3://<artifacts-bucket>/gold`       |
-| `SPARK_CHECKPOINT_BASE`     | Root checkpoint path (stage subdirectories appended)| `s3://<checkpoints-bucket>/checkpoints` |
-| `KAFKA_BOOTSTRAP_BROKERS`   | Kafka connection string for streaming ingestion    | `localhost:9092`                     |
-| `KAFKA_STARTING_OFFSETS`    | Kafka starting offsets (`latest` / `earliest`)     | `latest`                             |
-| `GOLD_KAFKA_TOPIC`          | Optional fan-out topic for gold lap metrics        | *(empty)*                            |
-
-Adjust these via environment variables or CLI arguments as needed for EMR vs. local runs.

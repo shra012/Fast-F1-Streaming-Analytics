@@ -109,23 +109,59 @@ execute_cypher \
     "CREATE INDEX driver_session_id_idx IF NOT EXISTS FOR (d:Driver) ON (d.sessionId);" \
     "Driver sessionId index"
 
+execute_cypher \
+    "CREATE INDEX driver_id_idx IF NOT EXISTS FOR (d:Driver) ON (d.driverId);" \
+    "Driver driverId index"
+
+execute_cypher \
+    "CREATE INDEX driver_avg_speed_idx IF NOT EXISTS FOR (d:Driver) ON (d.avgSpeedKph);" \
+    "Driver avgSpeedKph index"
+
+execute_cypher \
+    "CREATE INDEX driver_max_speed_idx IF NOT EXISTS FOR (d:Driver) ON (d.maxSpeedKph);" \
+    "Driver maxSpeedKph index"
+
 # Indexes on Session properties
 execute_cypher \
-    "CREATE INDEX session_driver_count_idx IF NOT EXISTS FOR (s:Session) ON (s.driver_count);" \
-    "Session driver_count index"
+    "CREATE INDEX session_driver_count_idx IF NOT EXISTS FOR (s:Session) ON (s.driverCount);" \
+    "Session driverCount index"
+
+execute_cypher \
+    "CREATE INDEX session_lap_count_idx IF NOT EXISTS FOR (s:Session) ON (s.lapCount);" \
+    "Session lapCount index"
+
+execute_cypher \
+    "CREATE INDEX session_first_event_idx IF NOT EXISTS FOR (s:Session) ON (s.firstEventTs);" \
+    "Session firstEventTs index"
+
+execute_cypher \
+    "CREATE INDEX session_last_event_idx IF NOT EXISTS FOR (s:Session) ON (s.lastEventTs);" \
+    "Session lastEventTs index"
 
 # Indexes on Lap properties
 execute_cypher \
-    "CREATE INDEX lap_session_id_idx IF NOT EXISTS FOR (l:Lap) ON (l.session_id);" \
-    "Lap session_id index"
+    "CREATE INDEX lap_session_id_idx IF NOT EXISTS FOR (l:Lap) ON (l.sessionId);" \
+    "Lap sessionId index"
 
 execute_cypher \
-    "CREATE INDEX lap_driver_id_idx IF NOT EXISTS FOR (l:Lap) ON (l.driver_id);" \
-    "Lap driver_id index"
+    "CREATE INDEX lap_driver_id_idx IF NOT EXISTS FOR (l:Lap) ON (l.driverId);" \
+    "Lap driverId index"
 
 execute_cypher \
-    "CREATE INDEX lap_lap_number_idx IF NOT EXISTS FOR (l:Lap) ON (l.lap_number);" \
-    "Lap lap_number index"
+    "CREATE INDEX lap_lap_number_idx IF NOT EXISTS FOR (l:Lap) ON (l.lapNumber);" \
+    "Lap lapNumber index"
+
+execute_cypher \
+    "CREATE INDEX lap_avg_speed_idx IF NOT EXISTS FOR (l:Lap) ON (l.avgSpeedKph);" \
+    "Lap avgSpeedKph index"
+
+execute_cypher \
+    "CREATE INDEX lap_max_speed_idx IF NOT EXISTS FOR (l:Lap) ON (l.maxSpeedKph);" \
+    "Lap maxSpeedKph index"
+
+execute_cypher \
+    "CREATE INDEX lap_last_event_idx IF NOT EXISTS FOR (l:Lap) ON (l.lastEventTs);" \
+    "Lap lastEventTs index"
 
 # Indexes on Relationships
 execute_cypher \
@@ -133,24 +169,76 @@ execute_cypher \
     "DROVE_IN relationship sessionId index"
 
 execute_cypher \
+    "CREATE INDEX drove_in_driver_idx IF NOT EXISTS FOR ()-[r:DROVE_IN]-() ON (r.driverId);" \
+    "DROVE_IN relationship driverId index"
+
+execute_cypher \
+    "CREATE INDEX drove_in_first_lap_idx IF NOT EXISTS FOR ()-[r:DROVE_IN]-() ON (r.firstLap);" \
+    "DROVE_IN relationship firstLap index"
+
+execute_cypher \
+    "CREATE INDEX drove_in_last_lap_idx IF NOT EXISTS FOR ()-[r:DROVE_IN]-() ON (r.lastLap);" \
+    "DROVE_IN relationship lastLap index"
+
+execute_cypher \
     "CREATE INDEX completed_by_session_idx IF NOT EXISTS FOR ()-[r:COMPLETED_BY]-() ON (r.sessionId);" \
     "COMPLETED_BY relationship sessionId index"
 
 execute_cypher \
-    "CREATE INDEX completed_by_lap_idx IF NOT EXISTS FOR ()-[r:COMPLETED_BY]-() ON (r.lap);" \
-    "COMPLETED_BY relationship lap index"
+    "CREATE INDEX completed_by_lap_id_idx IF NOT EXISTS FOR ()-[r:COMPLETED_BY]-() ON (r.lapId);" \
+    "COMPLETED_BY relationship lapId index"
 
 execute_cypher \
-    "CREATE INDEX overtook_session_idx IF NOT EXISTS FOR ()-[r:OVERTOOK]-() ON (r.sessionId);" \
-    "OVERTOOK relationship sessionId index"
+    "CREATE INDEX completed_by_lap_number_idx IF NOT EXISTS FOR ()-[r:COMPLETED_BY]-() ON (r.lapNumber);" \
+    "COMPLETED_BY relationship lapNumber index"
 
 execute_cypher \
-    "CREATE INDEX overtook_lap_idx IF NOT EXISTS FOR ()-[r:OVERTOOK]-() ON (r.lap);" \
-    "OVERTOOK relationship lap index"
+    "CREATE INDEX completed_by_driver_idx IF NOT EXISTS FOR ()-[r:COMPLETED_BY]-() ON (r.driverId);" \
+    "COMPLETED_BY relationship driverId index"
+
+# Interaction relationships (OVERTAKE and BATTLE from gold_stream)
+execute_cypher \
+    "CREATE INDEX drove_in_last_lap_idx IF NOT EXISTS FOR ()-[r:DROVE_IN]-() ON (r.lastLap);" \
+    "DROVE_IN relationship lastLap index"
+
+# Interaction relationships (OVERTAKE and BATTLE)
+execute_cypher \
+    "CREATE INDEX overtake_session_idx IF NOT EXISTS FOR ()-[r:OVERTAKE]-() ON (r.sessionId);" \
+    "OVERTAKE relationship sessionId index"
 
 execute_cypher \
-    "CREATE INDEX battled_session_idx IF NOT EXISTS FOR ()-[r:BATTLED]-() ON (r.sessionId);" \
-    "BATTLED relationship sessionId index"
+    "CREATE INDEX overtake_lap_idx IF NOT EXISTS FOR ()-[r:OVERTAKE]-() ON (r.lapNumber);" \
+    "OVERTAKE relationship lapNumber index"
+
+execute_cypher \
+    "CREATE INDEX overtake_event_idx IF NOT EXISTS FOR ()-[r:OVERTAKE]-() ON (r.eventId);" \
+    "OVERTAKE relationship eventId index"
+
+execute_cypher \
+    "CREATE INDEX battle_session_idx IF NOT EXISTS FOR ()-[r:BATTLE]-() ON (r.sessionId);" \
+    "BATTLE relationship sessionId index"
+
+execute_cypher \
+    "CREATE INDEX battle_lap_idx IF NOT EXISTS FOR ()-[r:BATTLE]-() ON (r.lapNumber);" \
+    "BATTLE relationship lapNumber index"
+
+execute_cypher \
+    "CREATE INDEX battle_event_idx IF NOT EXISTS FOR ()-[r:BATTLE]-() ON (r.eventId);" \
+    "BATTLE relationship eventId index"
+
+# ==========================================
+
+execute_cypher \
+    "CREATE INDEX overtake_lap_idx IF NOT EXISTS FOR ()-[r:OVERTAKE]-() ON (r.lap_number);" \
+    "OVERTAKE relationship lap_number index"
+
+execute_cypher \
+    "CREATE INDEX battle_session_idx IF NOT EXISTS FOR ()-[r:BATTLE]-() ON (r.session_id);" \
+    "BATTLE relationship session_id index"
+
+execute_cypher \
+    "CREATE INDEX battle_lap_idx IF NOT EXISTS FOR ()-[r:BATTLE]-() ON (r.lap_number);" \
+    "BATTLE relationship lap_number index"
 
 # ==========================================
 # Verify Schema
