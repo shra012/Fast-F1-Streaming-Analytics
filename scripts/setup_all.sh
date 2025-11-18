@@ -127,6 +127,43 @@ make -C "${SPARK_DIR}" upload S3_PREFIX="${ARTIFACT_PREFIX}"
 # STEP 2: Create Spark environment file and copy to EMR
 # ============================================================================
 log_info "STEP 2: Creating Spark environment file..."
+
+# Load Neo4j credentials from neo4j/Neo4j.txt if it exists
+NEO4J_URI=""
+NEO4J_USERNAME="neo4j"
+NEO4J_PASSWORD=""
+NEO4J_DATABASE="neo4j"
+
+NEO4J_FILE="${REPO_ROOT}/neo4j/Neo4j.txt"
+if [[ -f "${NEO4J_FILE}" ]]; then
+  log_info "Loading Neo4j credentials from ${NEO4J_FILE}..."
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Skip comments and empty lines
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// }" ]] && continue
+    
+    if [[ "$line" =~ ^NEO4J_URI=(.+)$ ]]; then
+      NEO4J_URI="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^NEO4J_USERNAME=(.+)$ ]]; then
+      NEO4J_USERNAME="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^NEO4J_PASSWORD=(.+)$ ]]; then
+      NEO4J_PASSWORD="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^NEO4J_DATABASE=(.+)$ ]]; then
+      NEO4J_DATABASE="${BASH_REMATCH[1]}"
+    fi
+  done < "${NEO4J_FILE}"
+  
+  if [[ -n "${NEO4J_URI}" && -n "${NEO4J_PASSWORD}" ]]; then
+    log_info "✓ Neo4j credentials loaded successfully"
+  else
+    log_warn "Neo4j credentials incomplete in ${NEO4J_FILE}. Skipping Neo4j environment variables."
+    NEO4J_URI=""
+    NEO4J_PASSWORD=""
+  fi
+else
+  log_warn "Neo4j.txt not found at ${NEO4J_FILE}. Neo4j environment variables will not be set."
+fi
+
 cat > "${ENV_FILE}" <<EOF
 EMR_CLUSTER_ID=${EMR_CLUSTER_ID}
 EMR_MASTER_DNS=${EMR_MASTER_DNS}
@@ -138,6 +175,18 @@ SPARK_GOLD_BASE=${SPARK_GOLD_BASE:-}
 SPARK_CHECKPOINT_BASE=${SPARK_CHECKPOINT_BASE}
 EMR_KEY_PAIR_NAME=${EMR_KEY_PAIR_NAME}
 EOF
+
+# Add Neo4j environment variables if credentials were loaded
+if [[ -n "${NEO4J_URI}" && -n "${NEO4J_PASSWORD}" ]]; then
+  cat >> "${ENV_FILE}" <<EOF
+NEO4J_URI=${NEO4J_URI}
+NEO4J_USERNAME=${NEO4J_USERNAME}
+NEO4J_PASSWORD=${NEO4J_PASSWORD}
+NEO4J_DATABASE=${NEO4J_DATABASE}
+SPARK_WRITE_TO_NEO4J=true
+EOF
+fi
+
 chmod 600 "${ENV_FILE}"
 
 log_info "Copying Spark environment file to EMR..."
@@ -233,8 +282,10 @@ echo "========================================="
 echo "Installing Kafka console tools..."
 echo "========================================="
 
-if [[ -d "${KAFKA_TOOLS_DIR}" ]]; then
+# Check if kafka-tools directory exists and contains the necessary binaries
+if [[ -d "${KAFKA_TOOLS_DIR}" ]] && [[ -f "${KAFKA_TOOLS_DIR}/bin/kafka-topics.sh" ]] && [[ -f "${KAFKA_TOOLS_DIR}/bin/kafka-console-consumer.sh" ]]; then
   echo "[OK] Kafka tools already installed at ${KAFKA_TOOLS_DIR}"
+  echo "[SKIP] Skipping Kafka tools installation"
 else
   echo "Downloading Kafka ${KAFKA_VERSION}..."
   cd ~
@@ -331,6 +382,10 @@ echo "   spark-submit \\"
 echo "     --master yarn \\"
 echo "     --deploy-mode cluster \\"
 echo "     --name bronze_stream \\"
+echo "     --conf spark.dynamicAllocation.enabled=false \\"
+echo "     --conf spark.executor.instances=2 \\"
+echo "     --conf spark.executor.cores=2 \\"
+echo "     --conf spark.executor.memory=4g \\"
 echo "     --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,io.delta:delta-spark_2.12:3.1.0,org.apache.hudi:hudi-spark3.5-bundle_2.12:0.15.0 \\"
 echo "     --py-files s3://\${SPARK_ARTIFACT_BUCKET}/spark/spark_package.zip \\"
 echo "     s3://\${SPARK_ARTIFACT_BUCKET}/spark/bronze_stream.py \\"
@@ -340,11 +395,37 @@ echo "     --events-topic race.events \\"
 echo "     --output-base \"\${SPARK_BRONZE_BASE}\" \\"
 echo "     --checkpoint-base \"\${SPARK_CHECKPOINT_BASE}/bronze\""
 echo
-echo "3. Monitor the Spark job:"
+echo "3. Start the Gold streaming job (S3 ➜ Kafka graph topics + Neo4j):"
+echo "   ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS}"
+echo "   source ~/spark.env  # This loads Neo4j credentials from emr_job.env"
+echo "   spark-submit \\"
+echo "     --master yarn \\"
+echo "     --deploy-mode cluster \\"
+echo "     --name gold_stream \\"
+echo "     --conf spark.dynamicAllocation.enabled=false \\"
+echo "     --conf spark.executor.instances=2 \\"
+echo "     --conf spark.executor.cores=2 \\"
+echo "     --conf spark.executor.memory=4g \\"
+echo "     --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,io.delta:delta-spark_2.12:3.1.0,org.neo4j:neo4j-connector-apache-spark_2.12:5.3.10_for_spark_3 \\"
+echo "     --py-files s3://\${SPARK_ARTIFACT_BUCKET}/spark/spark_package.zip \\"
+echo "     s3://\${SPARK_ARTIFACT_BUCKET}/spark/gold_stream.py \\"
+echo "     --bootstrap-servers \"\${KAFKA_BOOTSTRAP}\" \\"
+echo "     --bronze-base \"\${SPARK_BRONZE_BASE}\" \\"
+echo "     --checkpoint-base \"\${SPARK_CHECKPOINT_BASE}/gold\" \\"
+echo "     --neo4j-uri \"\${NEO4J_URI}\" \\"
+echo "     --neo4j-username \"\${NEO4J_USERNAME}\" \\"
+echo "     --neo4j-password \"\${NEO4J_PASSWORD}\" \\"
+echo "     --neo4j-database \"\${NEO4J_DATABASE}\" \\"
+echo "     --write-to-neo4j"
+echo "   # Note: Neo4j credentials are loaded from ~/spark.env (sourced from emr_job.env)"
+echo "   # If Neo4j credentials are not set, remove --write-to-neo4j flag"
+echo "   # Add --kafka-sink-option entries for IAM/TLS if needed (see docs/kafka-connect-plan.md)."
+echo
+echo "4. Monitor the Spark jobs:"
 echo "   yarn application -list"
 echo "   yarn logs -applicationId <app_id>"
 echo
-echo "4. Check Kafka topics and messages:"
+echo "5. Check Kafka topics and messages:"
 echo "   ~/kafka-tools/bin/kafka-topics.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --list"
 echo "   ~/kafka-tools/bin/kafka-console-consumer.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --topic telemetry.raw --max-messages 5"
 echo

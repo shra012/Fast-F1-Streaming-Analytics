@@ -13,6 +13,7 @@ venv/
 # FastF1 cache directory
 .fastf1-cache/
 
-# Logs and temp files
+# Logs and temp files`
 *.log
 *.tmp
+Neo4j.txt

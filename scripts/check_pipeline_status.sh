@@ -19,6 +19,26 @@ NC='\033[0m' # No Color
 DETAILED_MODE=false
 RESET_MODE=false
 
+# Graph/Neo4j topic definitions
+GRAPH_TOPICS=(
+  "graph.neo4j.driver_nodes"
+  "graph.neo4j.session_nodes"
+  "graph.neo4j.team_nodes"
+  "graph.neo4j.lap_nodes"
+  "graph.neo4j.driver_session_edges"
+  "graph.neo4j.lap_completed_edges"
+  "graph.neo4j.overtake_edges"
+  "graph.neo4j.battle_edges"
+)
+DLQ_TOPIC="dlq.neo4j"
+
+# Runtime state trackers
+GOLD_JOB_RUNNING=false
+GRAPH_TOPICS_OK=false
+DLQ_EMPTY=true
+NEO4J_CONNECTED=false
+NEO4J_HAS_DATA=false
+
 # Show help function
 show_help() {
   echo -e "${CYAN}========================================${NC}"
@@ -58,8 +78,10 @@ show_help() {
   echo "  ./check_pipeline_status.sh --reset"
   echo
   echo -e "${YELLOW}WHAT IT CHECKS:${NC}"
-  echo "  ✓ YARN applications (bronze_stream job status)"
-  echo "  ✓ Kafka topics and message counts"
+  echo "  ✓ YARN applications (bronze and gold stream job status)"
+  echo "  ✓ Kafka topics and message counts (raw + graph topics)"
+  echo "  ✓ Kafka DLQ usage for Neo4j sink"
+  echo "  ✓ Neo4j connectivity and data (node/relationship counts)"
   echo "  ✓ Spark streaming checkpoints and batch progress"
   echo "  ✓ S3 bronze layer output (files and storage size)"
   echo "  ✓ Data processing efficiency (Kafka vs S3 comparison)"
@@ -71,11 +93,14 @@ show_help() {
   echo "  - Kafka tools installed at ~/kafka-tools (optional but recommended)"
   echo
   echo -e "${YELLOW}HEALTH SCORE:${NC}"
-  echo "  The script calculates a health score (0-4) based on:"
+  echo "  The script calculates a health score (0-7) based on:"
   echo "  - Bronze stream application running"
+  echo "  - Gold stream application running"
   echo "  - Checkpoints present"
   echo "  - Output data present"
   echo "  - Kafka topics available"
+  echo "  - Graph topics producing data"
+  echo "  - Neo4j database contains data"
   echo
   echo -e "${YELLOW}EXIT CODES:${NC}"
   echo "  0 - Success"
@@ -156,36 +181,40 @@ check_yarn_applications() {
   local yarn_output
   yarn_output=$(yarn application -list 2>/dev/null || true)
   
-  if echo "$yarn_output" | grep -q "bronze_stream"; then
-    local app_info
-    app_info=$(echo "$yarn_output" | grep "bronze_stream" | head -1)
-    local app_id=$(echo "$app_info" | awk '{print $1}')
-    local state=$(echo "$app_info" | awk '{print $6}')
-    
-    if [[ "$state" == "RUNNING" ]]; then
-      print_success "Bronze stream job is RUNNING"
-      print_info "Application ID: ${app_id}"
+  local jobs=("bronze_stream" "gold_stream")
+  for job_name in "${jobs[@]}"; do
+    if echo "$yarn_output" | grep -q "${job_name}"; then
+      local app_info
+      app_info=$(echo "$yarn_output" | grep "${job_name}" | head -1)
+      local app_id=$(echo "$app_info" | awk '{print $1}')
+      local state=$(echo "$app_info" | awk '{print $6}')
       
-      if [[ "$DETAILED_MODE" == true ]]; then
-        local tracking_url=$(echo "$app_info" | awk '{print $9}')
-        print_info "Tracking URL: ${tracking_url}"
+      if [[ "$state" == "RUNNING" ]]; then
+        print_success "${job_name} job is RUNNING"
+        print_info "Application ID: ${app_id}"
+        [[ "${job_name}" == "gold_stream" ]] && GOLD_JOB_RUNNING=true
         
-        local app_status
-        app_status=$(yarn application -status ${app_id} 2>/dev/null || true)
-        
-        if echo "$app_status" | grep -q "Start-Time"; then
-          local start_time=$(echo "$app_status" | grep "Start-Time" | awk '{print $3}')
-          local start_date=$(date -d @$((start_time / 1000)) 2>/dev/null || echo "N/A")
-          print_info "Started: ${start_date}"
+        if [[ "$DETAILED_MODE" == true ]]; then
+          local tracking_url=$(echo "$app_info" | awk '{print $9}')
+          print_info "Tracking URL: ${tracking_url}"
+          
+          local app_status
+          app_status=$(yarn application -status ${app_id} 2>/dev/null || true)
+          
+          if echo "$app_status" | grep -q "Start-Time"; then
+            local start_time=$(echo "$app_status" | grep "Start-Time" | awk '{print $3}')
+            local start_date=$(date -d @$((start_time / 1000)) 2>/dev/null || echo "N/A")
+            print_info "Started: ${start_date}"
+          fi
         fi
+      else
+        print_warning "${job_name} job state: ${state}"
       fi
     else
-      print_warning "Bronze stream job state: ${state}"
+      print_warning "No ${job_name} application found"
+      print_info "Check if the job was submitted"
     fi
-  else
-    print_warning "No bronze_stream application found"
-    print_info "Check if the job was submitted"
-  fi
+  done
   
   local total_apps=$(echo "$yarn_output" | grep -c "RUNNING" || echo "0")
   print_info "Total RUNNING applications: ${total_apps}"
@@ -233,6 +262,240 @@ check_kafka_topics() {
       print_info "[STATS] ${topic}: Unable to get message count"
     fi
   done
+}
+
+check_graph_topics() {
+  print_subheader "Neo4j Graph Topics"
+  
+  if [[ ! -d ~/kafka-tools ]]; then
+    print_warning "Kafka tools not installed at ~/kafka-tools"
+    print_info "Run setup_all.sh to install Kafka console tools"
+    return 0
+  fi
+  
+  local missing=0
+  local producing=0
+  
+  for topic in "${GRAPH_TOPICS[@]}"; do
+    local describe_output
+    describe_output=$(~/kafka-tools/bin/kafka-topics.sh --bootstrap-server ${FIRST_BROKER} --describe --topic "${topic}" 2>/dev/null || true)
+    
+    if [[ -z "$describe_output" ]]; then
+      print_warning "[GRAPH] ${topic}: topic not found"
+      ((missing++))
+      continue
+    fi
+    
+    local offsets
+    offsets=$(~/kafka-tools/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+       --broker-list ${FIRST_BROKER} --topic ${topic} 2>/dev/null || true)
+    local total=$(echo "$offsets" | awk -F: '{sum+=$3} END {print sum+0}')
+    
+    if [[ $total -gt 0 ]]; then
+      print_success "[GRAPH] ${topic}: ${total} messages"
+      ((producing++))
+    else
+      print_warning "[GRAPH] ${topic}: 0 messages yet"
+    fi
+  done
+  
+  if [[ $missing -eq 0 && $producing -gt 0 ]]; then
+    GRAPH_TOPICS_OK=true
+  else
+    GRAPH_TOPICS_OK=false
+  fi
+  
+  # DLQ check
+  local dlq_desc
+  dlq_desc=$(~/kafka-tools/bin/kafka-topics.sh --bootstrap-server ${FIRST_BROKER} --describe --topic ${DLQ_TOPIC} 2>/dev/null || true)
+  if [[ -z "$dlq_desc" ]]; then
+    print_warning "[DLQ] ${DLQ_TOPIC}: topic not found"
+    DLQ_EMPTY=true
+  else
+    local dlq_offsets
+    dlq_offsets=$(~/kafka-tools/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
+       --broker-list ${FIRST_BROKER} --topic ${DLQ_TOPIC} 2>/dev/null || true)
+    local dlq_total=$(echo "$dlq_offsets" | awk -F: '{sum+=$3} END {print sum+0}')
+    
+    if [[ $dlq_total -gt 0 ]]; then
+      DLQ_EMPTY=false
+      print_warning "[DLQ] ${DLQ_TOPIC}: ${dlq_total} messages pending investigation"
+      
+      if [[ "$DETAILED_MODE" == true ]]; then
+        print_info "Use kafka-console-consumer to inspect DLQ payloads."
+      fi
+    else
+      DLQ_EMPTY=true
+      print_success "[DLQ] ${DLQ_TOPIC}: empty"
+    fi
+  fi
+}
+
+# Check Neo4j connectivity and data
+check_neo4j() {
+  # Disable exit on error for this function
+  set +e
+  print_subheader "Neo4j Database Status"
+  
+  # Load Neo4j credentials - try multiple locations
+  local neo4j_file=""
+  local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local possible_locations=(
+    "${HOME}/neo4j/Neo4j.txt"
+    "${HOME}/../neo4j/Neo4j.txt"
+    "/home/hadoop/neo4j/Neo4j.txt"
+    "${script_dir}/../neo4j/Neo4j.txt"
+    "${script_dir}/../../neo4j/Neo4j.txt"
+  )
+  
+  for location in "${possible_locations[@]}"; do
+    if [[ -f "$location" ]]; then
+      neo4j_file="$location"
+      break
+    fi
+  done
+  
+  if [[ -z "$neo4j_file" ]]; then
+    print_warning "Neo4j.txt not found. Skipping Neo4j checks."
+    print_info "Searched locations:"
+    for loc in "${possible_locations[@]}"; do
+      print_info "  - $loc"
+    done
+    return 0
+  fi
+  
+  # Parse Neo4j credentials
+  local neo4j_uri=""
+  local neo4j_username=""
+  local neo4j_password=""
+  local neo4j_database="neo4j"
+  
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Skip comments and empty lines
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// }" ]] && continue
+    # Extract key=value pairs
+    if [[ "$line" =~ ^NEO4J_URI=(.+)$ ]]; then
+      neo4j_uri="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^NEO4J_USERNAME=(.+)$ ]]; then
+      neo4j_username="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^NEO4J_PASSWORD=(.+)$ ]]; then
+      neo4j_password="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^NEO4J_DATABASE=(.+)$ ]]; then
+      neo4j_database="${BASH_REMATCH[1]}"
+    fi
+  done < "$neo4j_file"
+  
+  if [[ -z "$neo4j_uri" || -z "$neo4j_username" || -z "$neo4j_password" ]]; then
+    print_warning "Neo4j credentials incomplete in Neo4j.txt"
+    return 0
+  fi
+  
+  # Check if cypher-shell is available
+  if ! command -v cypher-shell &> /dev/null; then
+    print_warning "cypher-shell not found. Install with: brew install neo4j"
+    print_info "Neo4j URI: ${neo4j_uri}"
+    return 0
+  fi
+  
+  # Test Neo4j connectivity
+  print_info "Connecting to Neo4j: ${neo4j_uri}"
+  local connect_test
+  connect_test=$(echo "RETURN 1 as test;" | cypher-shell -a "$neo4j_uri" -u "$neo4j_username" -p "$neo4j_password" --database "$neo4j_database" --format plain 2>&1)
+  
+  if [[ $? -ne 0 ]]; then
+    print_error "Failed to connect to Neo4j"
+    print_info "Error: ${connect_test}"
+    NEO4J_CONNECTED=false
+    return 0
+  fi
+  
+  NEO4J_CONNECTED=true
+  print_success "Neo4j connection: OK"
+  
+  # Count nodes by label
+  print_info "Counting nodes..."
+  local node_counts
+  node_counts=$(echo "MATCH (n) RETURN labels(n)[0] as label, count(n) as count ORDER BY label;" | \
+    cypher-shell -a "$neo4j_uri" -u "$neo4j_username" -p "$neo4j_password" --database "$neo4j_database" --format plain 2>/dev/null || echo "")
+  
+  if [[ -n "$node_counts" ]]; then
+    local total_nodes=0
+    while IFS='|' read -r label count; do
+      # Skip header and empty lines
+      [[ "$label" =~ ^label ]] && continue
+      [[ -z "${label// }" ]] && continue
+      label=$(echo "$label" | xargs)
+      count=$(echo "$count" | xargs)
+      if [[ "$count" =~ ^[0-9]+$ ]]; then
+        total_nodes=$((total_nodes + count))
+        if [[ $count -gt 0 ]]; then
+          print_success "  ${label}: ${count} nodes"
+        fi
+      fi
+    done <<< "$node_counts"
+    
+    if [[ $total_nodes -gt 0 ]]; then
+      NEO4J_HAS_DATA=true
+      print_success "Total nodes: ${total_nodes}"
+    else
+      print_warning "No nodes found in Neo4j"
+    fi
+  fi
+  
+  # Count relationships by type
+  print_info "Counting relationships..."
+  local rel_counts
+  rel_counts=$(echo "MATCH ()-[r]->() RETURN type(r) as rel_type, count(r) as count ORDER BY rel_type;" | \
+    cypher-shell -a "$neo4j_uri" -u "$neo4j_username" -p "$neo4j_password" --database "$neo4j_database" --format plain 2>/dev/null || echo "")
+  
+  if [[ -n "$rel_counts" ]]; then
+    local total_rels=0
+    while IFS='|' read -r rel_type count; do
+      # Skip header and empty lines
+      [[ "$rel_type" =~ ^rel_type ]] && continue
+      [[ -z "${rel_type// }" ]] && continue
+      rel_type=$(echo "$rel_type" | xargs)
+      count=$(echo "$count" | xargs)
+      if [[ "$count" =~ ^[0-9]+$ ]]; then
+        total_rels=$((total_rels + count))
+        if [[ $count -gt 0 ]]; then
+          print_success "  ${rel_type}: ${count} relationships"
+        fi
+      fi
+    done <<< "$rel_counts"
+    
+    if [[ $total_rels -gt 0 ]]; then
+      print_success "Total relationships: ${total_rels}"
+    else
+      print_warning "No relationships found in Neo4j"
+    fi
+  fi
+  
+  # Check specific node types we expect
+  if [[ "$DETAILED_MODE" == true ]]; then
+    print_info "Detailed node breakdown:"
+    for node_type in Driver Session Team Lap; do
+      local count
+      count=$(echo "MATCH (n:${node_type}) RETURN count(n) as count;" | \
+        cypher-shell -a "$neo4j_uri" -u "$neo4j_username" -p "$neo4j_password" --database "$neo4j_database" --format plain 2>/dev/null | \
+        grep -E '^[0-9]+$' | head -1 || echo "0")
+      if [[ "$count" =~ ^[0-9]+$ && $count -gt 0 ]]; then
+        print_info "  ${node_type}: ${count}"
+      fi
+    done
+  fi
+  
+  # Summary
+  if [[ "$NEO4J_HAS_DATA" == true ]]; then
+    print_success "Neo4j database contains graph data"
+  else
+    print_warning "Neo4j database is empty or not receiving data"
+    print_info "Check MSK Connect connector status and Kafka topics"
+  fi
+  
+  # Re-enable exit on error
+  set -e
 }
 
 # Check Spark streaming checkpoints
@@ -563,7 +826,7 @@ generate_summary() {
   print_header "SUMMARY & RECOMMENDATIONS"
   
   local health_score=0
-  local max_score=4
+  local max_score=7
   
   # Check if bronze_stream is running
   if yarn application -list 2>/dev/null | grep -q "bronze_stream.*RUNNING"; then
@@ -582,6 +845,21 @@ generate_summary() {
   
   # Check if Kafka has messages
   if [[ -d ~/kafka-tools ]] && ~/kafka-tools/bin/kafka-topics.sh --bootstrap-server ${FIRST_BROKER} --list 2>/dev/null | grep -q "telemetry.raw"; then
+    ((health_score++))
+  fi
+  
+  # Check if gold_stream is running
+  if [[ "$GOLD_JOB_RUNNING" == true ]]; then
+    ((health_score++))
+  fi
+  
+  # Check if graph topics are healthy
+  if [[ "$GRAPH_TOPICS_OK" == true ]]; then
+    ((health_score++))
+  fi
+  
+  # Check if Neo4j has data
+  if [[ "$NEO4J_HAS_DATA" == true ]]; then
     ((health_score++))
   fi
   
@@ -604,6 +882,11 @@ generate_summary() {
   print_info "Detailed check: ./check_pipeline_status.sh --detailed"
   print_info "Reset pipeline: ./check_pipeline_status.sh --reset"
   
+  if [[ "$DLQ_EMPTY" == false ]]; then
+    echo
+    print_warning "DLQ contains messages. Inspect ${DLQ_TOPIC} for failed Neo4j writes."
+  fi
+  
   echo
 }
 
@@ -621,6 +904,8 @@ main() {
   
   check_yarn_applications
   check_kafka_topics
+  check_graph_topics
+  check_neo4j
   check_checkpoints
   check_s3_output
   

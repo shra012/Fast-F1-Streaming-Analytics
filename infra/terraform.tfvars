@@ -21,8 +21,8 @@ tags = {
 ################################################################################
 
 # Provide existing networking primitives used by MSK, EMR, and ECS.
-vpc_id           = "vpc-0f2d2cd0ae1940418"
-private_subnet_ids = ["subnet-0cab078a6cd0cbac1", "subnet-0c1e9d75e3c4c49d6", "subnet-0916e530e8d48e95e"]
+vpc_id           = "vpc-09cf1d42cfe5fc374"
+private_subnet_ids = ["subnet-0cb79f738d3f87973", "subnet-0ad1d1c4c2b456d83", "subnet-0f6e6b4eddfcf67ac"]
 
 security_group_ids = {
   msk = ""
@@ -35,6 +35,14 @@ security_group_ids = {
 
 create_msk         = true
 create_emr_cluster = true
+
+################################################################################
+# Kafka EC2 Cluster Configuration
+# Note: Kafka EC2 is a standalone module. To deploy it:
+#   1. cd infra/modules/kafka-ec2
+#   2. Update terraform.tfvars with your VPC/subnet IDs
+#   3. terraform init && terraform plan && terraform apply
+################################################################################
 
 ################################################################################
 # Existing Resources (Discovery Override)
@@ -76,7 +84,7 @@ msk_client_ingress_cidrs = ["68.250.225.30/32"]
 emr_cluster_release_label        = "emr-7.10.0"
 emr_cluster_master_instance_type = "m4.large"
 emr_cluster_core_instance_type   = "m4.large"
-emr_cluster_core_instance_count  = 2
+emr_cluster_core_instance_count  = 4
 ################################################################################
 # Monitoring and lifecycle
 ################################################################################
