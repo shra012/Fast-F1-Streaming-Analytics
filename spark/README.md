@@ -6,7 +6,7 @@ implement the **Bronze → Gold** processing pipeline for Formula 1 telemetry an
 | Stage  | Script               | Status | Purpose                                                                 |
 |--------|----------------------|--------|-------------------------------------------------------------------------|
 | Bronze | `bronze_stream.py`   | Running | **Kafka → S3**: Ingest raw telemetry & race events from MSK topics, parse JSON, write to Delta tables|
-| Gold   | `gold_stream.py`     | Planned | **S3 → S3/Neo4j**: Read Bronze, cleanse/aggregate, compute graph analytics, write to S3 + Neo4j, expose serving layer |
+| Gold   | `gold_stream.py`     | Running | **S3 → Kafka (Neo4j topics)**: Read Bronze, cleanse/aggregate, derive graph nodes/edges, publish to `graph.neo4j.*` topics for MSK Connect |
 
 **Architecture Decision**: Two-stage pipeline consolidating Silver + Gold + Platinum into unified Gold stage. 
 
@@ -83,6 +83,11 @@ These exports make it easy to copy-paste the commands below. MSK bootstrap and N
    spark-submit \
      --master yarn \
      --deploy-mode cluster \
+     --name bronze_stream \
+     --conf spark.dynamicAllocation.enabled=false \
+     --conf spark.executor.instances=2 \
+     --conf spark.executor.cores=2 \
+     --conf spark.executor.memory=4g \
      --py-files s3://$SPARK_ARTIFACT_BUCKET/spark/spark_package.zip \
      s3://$SPARK_ARTIFACT_BUCKET/spark/bronze_stream.py \
      --bootstrap-servers "$KAFKA_BOOTSTRAP" \
@@ -95,31 +100,31 @@ These exports make it easy to copy-paste the commands below. MSK bootstrap and N
    
    **Status**: Running successfully, 133.58 MB processed
 
-4. **Submit the Gold job** - unified analytics and serving layer (planned):
+4. **Submit the Gold job** - derive Neo4j graph payloads and publish to Kafka:
    ```bash
    spark-submit \
      --master yarn \
      --deploy-mode cluster \
-     --packages org.neo4j:neo4j-connector-apache-spark_2.12:5.3.0,graphframes:graphframes:0.8.3-spark3.5-s_2.12 \
+     --name gold_stream \
+     --conf spark.dynamicAllocation.enabled=false \
+     --conf spark.executor.instances=2 \
+     --conf spark.executor.cores=2 \
+     --conf spark.executor.memory=4g \
+     --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,io.delta:delta-spark_2.12:3.1.0 \
      --py-files s3://$SPARK_ARTIFACT_BUCKET/spark/spark_package.zip \
      s3://$SPARK_ARTIFACT_BUCKET/spark/gold_stream.py \
+     --bootstrap-servers "$KAFKA_BOOTSTRAP" \
      --bronze-base "$SPARK_BRONZE_BASE" \
-     --output-base "$SPARK_GOLD_BASE" \
      --checkpoint-base "$SPARK_CHECKPOINT_BASE/gold" \
-     --neo4j-uri "$NEO4J_URI" \
-     --neo4j-user "$NEO4J_USER" \
-     --neo4j-password "$NEO4J_PASSWORD" \
-     --enable-graph-analytics \
-     --centrality-window-laps 50
+     --kafka-sink-option security.protocol=SASL_SSL \
+     --kafka-sink-option sasl.mechanism=AWS_MSK_IAM \
+     --kafka-sink-option sasl.jaas.config='software.amazon.msk.auth.iam.IAMLoginModule required;' \
+     --kafka-sink-option sasl.client.callback.handler.class=software.amazon.msk.auth.iam.IAMClientCallbackHandler
    ```
    
-   **Prerequisites for Gold**:
-   - Neo4j Aura instance provisioned
-   - Connection credentials in `~/spark.env` on EMR
-   - Spark cluster IP allowlisted in Neo4j
-   - Schema constraints created (unique driver_id, session_id)
-   - Indexes on frequently queried properties (driver_id, lap_number, session_id)
-   - Dimension seed data loaded (drivers, teams, circuits)
+   This job emits Driver/Session/Team/Lap nodes and OVERTOOK/BATTLED relationships into Kafka topics that MSK Connect sinks into Neo4j Aura (see `docs/kafka-connect-plan.md`). Include the IAM/TLS options above if your MSK cluster enforces IAM authentication.
+   
+   > **Note**: The sample cluster runs just two core nodes, so dynamic allocation is disabled and the executor count is capped at two to avoid exhausting YARN containers. Increase these values only after scaling the EMR cluster.
 
 5. **Monitor execution** - leverage YARN CLI (`yarn application -list`, `yarn logs -applicationId ...`), the ResourceManager UI (tunnel via SSH), and CloudWatch log group `/aws/emr/<cluster-name>`.
 
@@ -141,7 +146,7 @@ provide the appropriate package via `spark.jars.packages`. Example:
 
 Gold job requires Neo4j Spark Connector and GraphFrames for inline analytics. Add via `--packages`:
 ```bash
---packages org.neo4j:neo4j-connector-apache-spark_2.12:5.3.0,graphframes:graphframes:0.8.3-spark3.5-s_2.12
+--packages org.neo4j:neo4j-connector-apache-spark_2.12:5.3.10_for_spark_3,graphframes:graphframes:0.8.3-spark3.5-s_2.12
 ```
 
 Configure connection in code or via Spark conf:

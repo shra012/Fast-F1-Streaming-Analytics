@@ -29,3 +29,5 @@ spark/dist/
 *.tfplan
 
 .DS_Store
+
+neo4j/Neo4j.txt

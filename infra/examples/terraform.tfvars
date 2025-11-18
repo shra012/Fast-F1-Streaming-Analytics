@@ -78,9 +78,9 @@ msk_kafka_version   = "3.6.0"
 ################################################################################
 
 emr_cluster_release_label        = "emr-7.10.0"
-emr_cluster_master_instance_type = "m7g.large"
-emr_cluster_core_instance_type   = "m7g.large"
-emr_cluster_core_instance_count  = 2
+emr_cluster_master_instance_type = "m4.large"
+emr_cluster_core_instance_type   = "m4.large"
+emr_cluster_core_instance_count  = 4
 
 ################################################################################
 # Monitoring and lifecycle

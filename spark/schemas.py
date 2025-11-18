@@ -91,3 +91,18 @@ LAP_METRICS_SCHEMA = StructType(
     ]
 )
 
+# Generic payload schema for interaction-style race events (overtakes, battles).
+INTERACTION_EVENT_PAYLOAD_SCHEMA = StructType(
+    [
+        StructField("attacker_id", StringType(), True),
+        StructField("defender_id", StringType(), True),
+        StructField("driver_a_id", StringType(), True),
+        StructField("driver_b_id", StringType(), True),
+        StructField("lap_number", IntegerType(), True),
+        StructField("lap_count", IntegerType(), True),
+        StructField("avg_gap_ms", FloatType(), True),
+        StructField("delta_time_ms", FloatType(), True),
+        StructField("battle_type", StringType(), True),
+        StructField("notes", StringType(), True),
+    ]
+)

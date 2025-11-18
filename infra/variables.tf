@@ -94,6 +94,7 @@ variable "create_emr_cluster" {
   default     = false
 }
 
+
 variable "emr_existing_key_name" {
   description = "Existing EC2 key pair name to attach to the EMR cluster (leave blank to create one)"
   type        = string
@@ -105,6 +106,66 @@ variable "emr_key_pair_name" {
   type        = string
   default     = ""
 }
+
+################################################################################
+# Kafka EC2 Cluster Variables
+# Note: Kafka EC2 module is standalone - run terraform from infra/modules/kafka-ec2/
+# These variables are kept for reference but not used in main.tf
+################################################################################
+
+# variable "create_kafka_ec2" {
+#   description = "Whether to create Kafka cluster on EC2 instances"
+#   type        = bool
+#   default     = false
+# }
+
+# variable "kafka_ec2_instance_type" {
+#   description = "EC2 instance type for Kafka nodes"
+#   type        = string
+#   default     = "t3.medium"
+# }
+
+# variable "kafka_ec2_node_count" {
+#   description = "Number of Kafka EC2 nodes"
+#   type        = number
+#   default     = 3
+# }
+
+# variable "kafka_ec2_key_name" {
+#   description = "EC2 key pair name for Kafka EC2 cluster SSH access"
+#   type        = string
+#   default     = ""
+# }
+
+# variable "kafka_ec2_allowed_cidr_blocks" {
+#   description = "CIDR blocks allowed to access Kafka EC2 cluster (default: 0.0.0.0/0 for all)"
+#   type        = list(string)
+#   default     = ["0.0.0.0/0"]
+# }
+
+# variable "kafka_ec2_vpc_id" {
+#   description = "VPC ID for Kafka EC2 cluster (defaults to main vpc_id if not specified)"
+#   type        = string
+#   default     = ""
+# }
+
+# variable "kafka_ec2_subnet_ids" {
+#   description = "Subnet IDs for Kafka EC2 cluster (defaults to private_subnet_ids if not specified)"
+#   type        = list(string)
+#   default     = []
+# }
+
+# variable "kafka_ec2_project" {
+#   description = "Project name for Kafka EC2 cluster (defaults to main project if not specified)"
+#   type        = string
+#   default     = ""
+# }
+
+# variable "kafka_ec2_environment" {
+#   description = "Environment name for Kafka EC2 cluster (defaults to main environment if not specified)"
+#   type        = string
+#   default     = ""
+# }
 
 variable "emr_ssh_public_key_path" {
   description = "Path to the SSH public key used to create the EMR key pair (ignored when emr_existing_key_name is set)"
@@ -164,7 +225,7 @@ variable "emr_cluster_core_instance_type" {
 variable "emr_cluster_core_instance_count" {
   description = "Number of EMR core nodes"
   type        = number
-  default     = 2
+  default     = 4
 }
 
 variable "emr_cluster_release_label" {
