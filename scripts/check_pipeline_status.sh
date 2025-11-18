@@ -62,8 +62,11 @@ show_help() {
   echo "               - Provides error detection from YARN logs"
   echo
   echo -e "  ${GREEN}--reset${NC}      Interactive pipeline reset mode"
-  echo "               - Option 1: Clean checkpoints only (reprocess data)"
-  echo "               - Option 2: Clean checkpoints and output (fresh start)"
+  echo "               - Option 1: Clean bronze checkpoints only"
+  echo "               - Option 2: Clean gold checkpoints only"
+  echo "               - Option 3: Clean both bronze and gold checkpoints"
+  echo "               - Option 4: Clean bronze checkpoints and output"
+  echo "               - Option 5: Complete fresh start (all checkpoints + output)"
   echo "               - Kills running Spark applications"
   echo "               - Allows recovery from data processing issues"
   echo
@@ -736,80 +739,182 @@ reset_pipeline() {
   echo -e "${YELLOW}This will clean up the pipeline and allow reprocessing from the beginning.${NC}"
   echo
   echo "Current state:"
+  echo -e "${CYAN}Bronze Layer:${NC}"
   aws s3 ls "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/bronze/" 2>/dev/null | grep "PRE" | wc -l | \
-    xargs -I {} echo "  - {} checkpoint directories"
+    xargs -I {} echo "  - {} bronze checkpoint directories"
   aws s3 ls "s3://${S3_RAW_BUCKET}/bronze/" 2>/dev/null | grep "PRE" | wc -l | \
-    xargs -I {} echo "  - {} output directories"
+    xargs -I {} echo "  - {} bronze output directories"
   
-  local app_id=$(yarn application -list 2>/dev/null | grep bronze_stream | head -1 | awk '{print $1}' || true)
-  if [[ -n "$app_id" ]]; then
-    echo "  - Running application: $app_id"
+  local bronze_app_id=$(yarn application -list 2>/dev/null | grep bronze_stream | head -1 | awk '{print $1}' || true)
+  if [[ -n "$bronze_app_id" ]]; then
+    echo "  - Running bronze application: $bronze_app_id"
+  fi
+  
+  echo
+  echo -e "${CYAN}Gold Layer:${NC}"
+  aws s3 ls "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/gold/" 2>/dev/null | grep "PRE" | wc -l | \
+    xargs -I {} echo "  - {} gold checkpoint directories"
+  
+  local gold_app_id=$(yarn application -list 2>/dev/null | grep gold_stream | head -1 | awk '{print $1}' || true)
+  if [[ -n "$gold_app_id" ]]; then
+    echo "  - Running gold application: $gold_app_id"
   fi
   
   echo
   echo -e "${CYAN}What would you like to do?${NC}"
-  echo "  1) Clean checkpoints only (keeps existing output, reprocesses from Kafka beginning)"
-  echo "  2) Clean checkpoints and output (complete fresh start)"
-  echo "  3) Cancel (no changes)"
+  echo "  1) Clean bronze checkpoints only (reprocess bronze from Kafka)"
+  echo "  2) Clean gold checkpoints only (reprocess gold from bronze)"
+  echo "  3) Clean both bronze and gold checkpoints"
+  echo "  4) Clean bronze checkpoints and output (complete bronze fresh start)"
+  echo "  5) Clean both bronze and gold checkpoints + bronze output (complete fresh start)"
+  echo "  6) Cancel (no changes)"
   echo
-  read -p "Enter choice [1-3]: " choice
+  read -p "Enter choice [1-6]: " choice
   
   case $choice in
     1)
       echo
-      print_info "Cleaning checkpoints only..."
+      print_info "Cleaning bronze checkpoints only..."
       
-      # Kill running job
-      if [[ -n "$app_id" ]]; then
-        print_info "Killing application $app_id..."
-        yarn application -kill "$app_id" 2>/dev/null || true
-        sleep 5
+      # Kill running bronze job
+      if [[ -n "$bronze_app_id" ]]; then
+        print_info "Killing bronze application $bronze_app_id..."
+        yarn application -kill "$bronze_app_id" 2>/dev/null || true
+        sleep 3
       fi
       
-      # Delete checkpoints
-      print_info "Deleting checkpoints..."
+      # Delete bronze checkpoints
+      print_info "Deleting bronze checkpoints..."
       aws s3 rm "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/bronze/" --recursive
       
-      print_success "Checkpoints deleted"
+      print_success "Bronze checkpoints deleted"
       echo
       print_info "Next steps:"
-      print_info "  1. Restart the Spark job (it will reprocess from Kafka beginning)"
+      print_info "  1. Restart the bronze Spark job (it will reprocess from Kafka beginning)"
+      print_info "  2. Run: ./check_pipeline_status.sh to monitor progress"
+      ;;
+    
+    2)
+      echo
+      print_info "Cleaning gold checkpoints only..."
+      
+      # Kill running gold job
+      if [[ -n "$gold_app_id" ]]; then
+        print_info "Killing gold application $gold_app_id..."
+        yarn application -kill "$gold_app_id" 2>/dev/null || true
+        sleep 3
+      fi
+      
+      # Delete gold checkpoints
+      print_info "Deleting gold checkpoints..."
+      aws s3 rm "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/gold/" --recursive
+      
+      print_success "Gold checkpoints deleted"
+      echo
+      print_info "Next steps:"
+      print_info "  1. Restart the gold Spark job (it will reprocess from bronze layer)"
+      print_info "  2. Run: ./check_pipeline_status.sh to monitor progress"
+      ;;
+    
+    3)
+      echo
+      print_info "Cleaning both bronze and gold checkpoints..."
+      
+      # Kill running jobs
+      if [[ -n "$bronze_app_id" ]]; then
+        print_info "Killing bronze application $bronze_app_id..."
+        yarn application -kill "$bronze_app_id" 2>/dev/null || true
+      fi
+      if [[ -n "$gold_app_id" ]]; then
+        print_info "Killing gold application $gold_app_id..."
+        yarn application -kill "$gold_app_id" 2>/dev/null || true
+      fi
+      sleep 5
+      
+      # Delete checkpoints
+      print_info "Deleting bronze checkpoints..."
+      aws s3 rm "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/bronze/" --recursive
+      print_info "Deleting gold checkpoints..."
+      aws s3 rm "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/gold/" --recursive
+      
+      print_success "All checkpoints deleted"
+      echo
+      print_info "Next steps:"
+      print_info "  1. Restart both bronze and gold Spark jobs"
       print_info "  2. Run: ./check_pipeline_status.sh to monitor progress"
       ;;
       
-    2)
+    4)
       echo
       print_warning "This will delete ALL bronze layer data and checkpoints!"
       read -p "Are you sure? (yes/no): " confirm
       
       if [[ "$confirm" == "yes" ]]; then
-        # Kill running job
-        if [[ -n "$app_id" ]]; then
-          print_info "Killing application $app_id..."
-          yarn application -kill "$app_id" 2>/dev/null || true
-          sleep 5
+        # Kill running bronze job
+        if [[ -n "$bronze_app_id" ]]; then
+          print_info "Killing bronze application $bronze_app_id..."
+          yarn application -kill "$bronze_app_id" 2>/dev/null || true
+          sleep 3
         fi
         
-        # Delete checkpoints
-        print_info "Deleting checkpoints..."
+        # Delete bronze checkpoints
+        print_info "Deleting bronze checkpoints..."
         aws s3 rm "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/bronze/" --recursive
         
-        # Delete output
+        # Delete bronze output
         print_info "Deleting bronze layer output..."
         aws s3 rm "s3://${S3_RAW_BUCKET}/bronze/" --recursive
         
-        print_success "Complete cleanup done"
+        print_success "Bronze layer cleanup done"
         echo
         print_info "Next steps:"
-        print_info "  1. Restart the Spark job with updated code"
-        print_info "  2. Job will process with maxOffsetsPerTrigger=100K limit"
+        print_info "  1. Restart the bronze Spark job with updated code"
+        print_info "  2. Gold job will automatically pick up new bronze data"
         print_info "  3. Run: ./check_pipeline_status.sh to monitor progress"
       else
         print_info "Cancelled"
       fi
       ;;
       
-    3)
+    5)
+      echo
+      print_warning "This will delete ALL bronze data, bronze checkpoints, and gold checkpoints!"
+      read -p "Are you sure? (yes/no): " confirm
+      
+      if [[ "$confirm" == "yes" ]]; then
+        # Kill running jobs
+        if [[ -n "$bronze_app_id" ]]; then
+          print_info "Killing bronze application $bronze_app_id..."
+          yarn application -kill "$bronze_app_id" 2>/dev/null || true
+        fi
+        if [[ -n "$gold_app_id" ]]; then
+          print_info "Killing gold application $gold_app_id..."
+          yarn application -kill "$gold_app_id" 2>/dev/null || true
+        fi
+        sleep 5
+        
+        # Delete all checkpoints
+        print_info "Deleting bronze checkpoints..."
+        aws s3 rm "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/bronze/" --recursive
+        print_info "Deleting gold checkpoints..."
+        aws s3 rm "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/gold/" --recursive
+        
+        # Delete bronze output
+        print_info "Deleting bronze layer output..."
+        aws s3 rm "s3://${S3_RAW_BUCKET}/bronze/" --recursive
+        
+        print_success "Complete cleanup done"
+        echo
+        print_info "Next steps:"
+        print_info "  1. Restart both bronze and gold Spark jobs with updated code"
+        print_info "  2. Jobs will process with maxOffsetsPerTrigger=100K limit"
+        print_info "  3. Run: ./check_pipeline_status.sh to monitor progress"
+      else
+        print_info "Cancelled"
+      fi
+      ;;
+      
+    6)
       print_info "No changes made"
       ;;
       
