@@ -19,22 +19,11 @@ NC='\033[0m' # No Color
 DETAILED_MODE=false
 RESET_MODE=false
 
-# Graph/Neo4j topic definitions
-GRAPH_TOPICS=(
-  "graph.neo4j.driver_nodes"
-  "graph.neo4j.session_nodes"
-  "graph.neo4j.team_nodes"
-  "graph.neo4j.lap_nodes"
-  "graph.neo4j.driver_session_edges"
-  "graph.neo4j.lap_completed_edges"
-  "graph.neo4j.overtake_edges"
-  "graph.neo4j.battle_edges"
-)
+# DLQ topic for Neo4j sink (if using MSK Connect)
 DLQ_TOPIC="dlq.neo4j"
 
 # Runtime state trackers
 GOLD_JOB_RUNNING=false
-GRAPH_TOPICS_OK=false
 DLQ_EMPTY=true
 NEO4J_CONNECTED=false
 NEO4J_HAS_DATA=false
@@ -67,6 +56,8 @@ show_help() {
   echo "               - Option 3: Clean both bronze and gold checkpoints"
   echo "               - Option 4: Clean bronze checkpoints and output"
   echo "               - Option 5: Complete fresh start (all checkpoints + output)"
+  echo "               - Option 6: FULL RESET (Kafka + S3 + checkpoints - CLEAN SLATE)"
+  echo "               - Option 7: Cancel"
   echo "               - Kills running Spark applications"
   echo "               - Allows recovery from data processing issues"
   echo
@@ -81,14 +72,14 @@ show_help() {
   echo "  ./check_pipeline_status.sh --reset"
   echo
   echo -e "${YELLOW}WHAT IT CHECKS:${NC}"
-  echo "  ✓ YARN applications (bronze and gold stream job status)"
-  echo "  ✓ Kafka topics and message counts (raw + graph topics)"
-  echo "  ✓ Kafka DLQ usage for Neo4j sink"
-  echo "  ✓ Neo4j connectivity and data (node/relationship counts)"
-  echo "  ✓ Spark streaming checkpoints and batch progress"
-  echo "  ✓ S3 bronze layer output (files and storage size)"
-  echo "  ✓ Data processing efficiency (Kafka vs S3 comparison)"
-  echo "  ✓ Recent streaming activity and errors"
+  echo "  - YARN applications (bronze and gold stream job status)"
+  echo "  - Kafka topics and message counts (raw topics: telemetry.raw, race.events)"
+  echo "  - Kafka DLQ usage for Neo4j sink (if MSK Connect configured)"
+  echo "  - Neo4j connectivity and data (node/relationship counts)"
+  echo "  - Spark streaming checkpoints and batch progress"
+  echo "  - S3 bronze layer output (files and storage size)"
+  echo "  - Data processing efficiency (Kafka vs S3 comparison)"
+  echo "  - Recent streaming activity and errors"
   echo
   echo -e "${YELLOW}PREREQUISITES:${NC}"
   echo "  - Must be run on EMR master node"
@@ -96,13 +87,12 @@ show_help() {
   echo "  - Kafka tools installed at ~/kafka-tools (optional but recommended)"
   echo
   echo -e "${YELLOW}HEALTH SCORE:${NC}"
-  echo "  The script calculates a health score (0-7) based on:"
+  echo "  The script calculates a health score (0-6) based on:"
   echo "  - Bronze stream application running"
   echo "  - Gold stream application running"
   echo "  - Checkpoints present"
   echo "  - Output data present"
   echo "  - Kafka topics available"
-  echo "  - Graph topics producing data"
   echo "  - Neo4j database contains data"
   echo
   echo -e "${YELLOW}EXIT CODES:${NC}"
@@ -267,8 +257,8 @@ check_kafka_topics() {
   done
 }
 
-check_graph_topics() {
-  print_subheader "Neo4j Graph Topics"
+check_dlq_topic() {
+  print_subheader "Dead Letter Queue (DLQ) Status"
   
   if [[ ! -d ~/kafka-tools ]]; then
     print_warning "Kafka tools not installed at ~/kafka-tools"
@@ -276,43 +266,11 @@ check_graph_topics() {
     return 0
   fi
   
-  local missing=0
-  local producing=0
-  
-  for topic in "${GRAPH_TOPICS[@]}"; do
-    local describe_output
-    describe_output=$(~/kafka-tools/bin/kafka-topics.sh --bootstrap-server ${FIRST_BROKER} --describe --topic "${topic}" 2>/dev/null || true)
-    
-    if [[ -z "$describe_output" ]]; then
-      print_warning "[GRAPH] ${topic}: topic not found"
-      ((missing++))
-      continue
-    fi
-    
-    local offsets
-    offsets=$(~/kafka-tools/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
-       --broker-list ${FIRST_BROKER} --topic ${topic} 2>/dev/null || true)
-    local total=$(echo "$offsets" | awk -F: '{sum+=$3} END {print sum+0}')
-    
-    if [[ $total -gt 0 ]]; then
-      print_success "[GRAPH] ${topic}: ${total} messages"
-      ((producing++))
-    else
-      print_warning "[GRAPH] ${topic}: 0 messages yet"
-    fi
-  done
-  
-  if [[ $missing -eq 0 && $producing -gt 0 ]]; then
-    GRAPH_TOPICS_OK=true
-  else
-    GRAPH_TOPICS_OK=false
-  fi
-  
-  # DLQ check
+  # DLQ check (only used if MSK Connect Neo4j sink is configured)
   local dlq_desc
   dlq_desc=$(~/kafka-tools/bin/kafka-topics.sh --bootstrap-server ${FIRST_BROKER} --describe --topic ${DLQ_TOPIC} 2>/dev/null || true)
   if [[ -z "$dlq_desc" ]]; then
-    print_warning "[DLQ] ${DLQ_TOPIC}: topic not found"
+    print_info "[DLQ] ${DLQ_TOPIC}: topic not found (normal - only needed for MSK Connect)"
     DLQ_EMPTY=true
   else
     local dlq_offsets
@@ -740,10 +698,13 @@ reset_pipeline() {
   echo
   echo "Current state:"
   echo -e "${CYAN}Bronze Layer:${NC}"
-  aws s3 ls "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/bronze/" 2>/dev/null | grep "PRE" | wc -l | \
-    xargs -I {} echo "  - {} bronze checkpoint directories"
-  aws s3 ls "s3://${S3_RAW_BUCKET}/bronze/" 2>/dev/null | grep "PRE" | wc -l | \
-    xargs -I {} echo "  - {} bronze output directories"
+  local bronze_checkpoint_count=$(aws s3 ls "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/bronze/" 2>/dev/null | grep "PRE" | wc -l)
+  bronze_checkpoint_count=${bronze_checkpoint_count:-0}
+  echo "  - ${bronze_checkpoint_count} bronze checkpoint directories"
+  
+  local bronze_output_count=$(aws s3 ls "s3://${S3_RAW_BUCKET}/bronze/" 2>/dev/null | grep "PRE" | wc -l)
+  bronze_output_count=${bronze_output_count:-0}
+  echo "  - ${bronze_output_count} bronze output directories"
   
   local bronze_app_id=$(yarn application -list 2>/dev/null | grep bronze_stream | head -1 | awk '{print $1}' || true)
   if [[ -n "$bronze_app_id" ]]; then
@@ -752,8 +713,10 @@ reset_pipeline() {
   
   echo
   echo -e "${CYAN}Gold Layer:${NC}"
-  aws s3 ls "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/gold/" 2>/dev/null | grep "PRE" | wc -l | \
-    xargs -I {} echo "  - {} gold checkpoint directories"
+  local gold_checkpoint_count=$(aws s3 ls "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/gold/" 2>/dev/null | grep "PRE" | wc -l)
+  gold_checkpoint_count=${gold_checkpoint_count:-0}
+  echo "  - ${gold_checkpoint_count} gold checkpoint directories"
+  echo "  - (Gold writes directly to Neo4j, no S3 output)"
   
   local gold_app_id=$(yarn application -list 2>/dev/null | grep gold_stream | head -1 | awk '{print $1}' || true)
   if [[ -n "$gold_app_id" ]]; then
@@ -767,9 +730,10 @@ reset_pipeline() {
   echo "  3) Clean both bronze and gold checkpoints"
   echo "  4) Clean bronze checkpoints and output (complete bronze fresh start)"
   echo "  5) Clean both bronze and gold checkpoints + bronze output (complete fresh start)"
-  echo "  6) Cancel (no changes)"
+  echo "  6) FULL RESET: Kafka topics + S3 data + all checkpoints (CLEAN SLATE)"
+  echo "  7) Cancel (no changes)"
   echo
-  read -p "Enter choice [1-6]: " choice
+  read -p "Enter choice [1-7]: " choice
   
   case $choice in
     1)
@@ -915,6 +879,75 @@ reset_pipeline() {
       ;;
       
     6)
+      echo
+      print_warning "⚠️  FULL RESET - This will:"
+      echo "  - Kill all running Spark applications"
+      echo "  - Delete ALL Kafka messages (telemetry.raw, race.events)"
+      echo "  - Delete ALL S3 bronze data"
+      echo "  - Delete ALL S3 checkpoints (bronze & gold)"
+      echo
+      print_error "This is a COMPLETE CLEAN SLATE - you'll need to restart the producer!"
+      echo
+      read -p "Are you ABSOLUTELY SURE? Type 'yes' to confirm: " confirm
+      
+      if [[ "$confirm" == "yes" ]]; then
+        # Kill running jobs
+        print_info "Step 1/5: Killing all streaming applications..."
+        if [[ -n "$bronze_app_id" ]]; then
+          yarn application -kill "$bronze_app_id" 2>/dev/null || true
+        fi
+        if [[ -n "$gold_app_id" ]]; then
+          yarn application -kill "$gold_app_id" 2>/dev/null || true
+        fi
+        sleep 5
+        
+        # Delete Kafka topic data
+        print_info "Step 2/5: Deleting Kafka topic messages..."
+        if [[ -d ~/kafka-tools ]]; then
+          for topic in telemetry.raw race.events; do
+            print_info "  Deleting messages from $topic..."
+            ~/kafka-tools/bin/kafka-topics.sh \
+              --bootstrap-server ${KAFKA_BOOTSTRAP} \
+              --delete --topic $topic 2>/dev/null || true
+            sleep 2
+            # Recreate topic
+            ~/kafka-tools/bin/kafka-topics.sh \
+              --bootstrap-server ${KAFKA_BOOTSTRAP} \
+              --create --topic $topic \
+              --partitions 6 --replication-factor 2 2>/dev/null || true
+          done
+          print_success "  Kafka topics reset"
+        else
+          print_warning "  Kafka tools not found, skipping Kafka cleanup"
+        fi
+        
+        # Delete all checkpoints
+        print_info "Step 3/5: Deleting all Spark checkpoints..."
+        aws s3 rm "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/bronze/" --recursive 2>/dev/null || true
+        aws s3 rm "s3://${S3_CHECKPOINTS_BUCKET}/checkpoints/gold/" --recursive 2>/dev/null || true
+        print_success "  All checkpoints deleted"
+        
+        # Delete bronze output
+        print_info "Step 4/5: Deleting all bronze data..."
+        aws s3 rm "s3://${S3_RAW_BUCKET}/bronze/" --recursive 2>/dev/null || true
+        print_success "  Bronze data deleted"
+        
+        print_info "Step 5/5: Verifying cleanup..."
+        sleep 2
+        
+        print_success "✅ COMPLETE CLEAN SLATE achieved!"
+        echo
+        print_info "Next steps:"
+        print_info "  1. Restart the producer to generate new data"
+        print_info "  2. Restart bronze_stream Spark job"
+        print_info "  3. Restart gold_stream Spark job"
+        print_info "  4. Run: ./check_pipeline_status.sh to monitor progress"
+      else
+        print_info "Cancelled - no changes made"
+      fi
+      ;;
+      
+    7)
       print_info "No changes made"
       ;;
       
@@ -931,7 +964,7 @@ generate_summary() {
   print_header "SUMMARY & RECOMMENDATIONS"
   
   local health_score=0
-  local max_score=7
+  local max_score=6
   
   # Check if bronze_stream is running
   if yarn application -list 2>/dev/null | grep -q "bronze_stream.*RUNNING"; then
@@ -955,11 +988,6 @@ generate_summary() {
   
   # Check if gold_stream is running
   if [[ "$GOLD_JOB_RUNNING" == true ]]; then
-    ((health_score++))
-  fi
-  
-  # Check if graph topics are healthy
-  if [[ "$GRAPH_TOPICS_OK" == true ]]; then
     ((health_score++))
   fi
   
@@ -1009,7 +1037,7 @@ main() {
   
   check_yarn_applications
   check_kafka_topics
-  check_graph_topics
+  check_dlq_topic
   check_neo4j
   check_checkpoints
   check_s3_output

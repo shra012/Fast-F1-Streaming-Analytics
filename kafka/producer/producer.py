@@ -13,9 +13,11 @@ Topics produced:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import random
 import sys
 import time
 import uuid
@@ -45,6 +47,7 @@ class TelemetryEvent:
     """Telemetry event matching TELEMETRY_SCHEMA in spark/schemas.py."""
     session_id: str
     driver_id: str
+    driver_name: Optional[str]
     car_number: str
     lap_number: int
     micro_sector_id: Optional[int]
@@ -76,6 +79,12 @@ class TelemetryEvent:
     weather_wind_direction_deg: Optional[float]
     source: str = "fastf1"
     ingest_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # Streaming algorithm fields
+    sensor_quality_score: Optional[float] = None
+    sequence_number: Optional[int] = None
+    sampling_weight: Optional[float] = None
+    telemetry_hash: Optional[str] = None
+    correlation_id: Optional[str] = None
 
 
 @dataclass
@@ -86,6 +95,7 @@ class RaceEvent:
     event_ts_utc: str
     event_type: str
     driver_id: Optional[str] = None
+    driver_name: Optional[str] = None
     lap_number: Optional[int] = None
     pit_stop_id: Optional[str] = None
     pit_duration_ms: Optional[int] = None
@@ -93,6 +103,13 @@ class RaceEvent:
     safety_car_state: Optional[str] = None
     payload: Optional[str] = None
     source: str = "fastf1"
+    # Streaming algorithm fields
+    event_hash: Optional[str] = None
+    interaction_strength: Optional[float] = None
+    community_id: Optional[str] = None
+    strategic_context: Optional[str] = None
+    position_delta: Optional[int] = None
+    sector_time_delta_ms: Optional[int] = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,6 +195,12 @@ Examples:
         help="Number of telemetry samples per batch (default: 100)",
     )
     parser.add_argument(
+        "--telemetry-sample-rate",
+        type=int,
+        default=1,
+        help="Send every Nth telemetry point (e.g., 10 = 1/10th of data, reduces volume)",
+    )
+    parser.add_argument(
         "--max-events",
         type=int,
         default=0,
@@ -253,11 +276,15 @@ def extract_telemetry_events(
     session: fastf1.core.Session,
     driver_filter: Optional[str] = None,
     batch_size: int = 100,
+    sample_rate: int = 1,
 ) -> Iterable[List[TelemetryEvent]]:
     """
     Extract telemetry events from session car data.
     
     Yields batches of telemetry events for efficient Kafka publishing.
+    
+    Args:
+        sample_rate: Send every Nth telemetry point (1 = all data, 10 = 10% of data)
     """
     session_id = get_session_id(session)
     
@@ -282,6 +309,7 @@ def extract_telemetry_events(
             
             driver_info = session.get_driver(driver)
             driver_number = str(driver_info.get('DriverNumber', driver))
+            driver_name = str(driver_info.get('Abbreviation', driver_info.get('FullName', driver)))
             
             # Get telemetry for this driver
             tel = driver_laps.get_telemetry()
@@ -290,6 +318,10 @@ def extract_telemetry_events(
             
             # Get driver's laps for tyre/stint info
             for idx, row in tel.iterrows():
+                # Apply sampling rate (only process every Nth row)
+                if sample_rate > 1 and idx % sample_rate != 0:
+                    continue
+                
                 # Find corresponding lap
                 lap_time = row.get('Time', row.get('SessionTime'))
                 if pd.isna(lap_time):
@@ -305,6 +337,7 @@ def extract_telemetry_events(
                 event = TelemetryEvent(
                     session_id=session_id,
                     driver_id=driver,
+                    driver_name=driver_name,
                     car_number=driver_number,
                     lap_number=lap_number,
                     micro_sector_id=None,  # Not available in FastF1
@@ -334,6 +367,12 @@ def extract_telemetry_events(
                     weather_humidity_pct=float(session.weather_data.iloc[-1]['Humidity']) if hasattr(session, 'weather_data') and not session.weather_data.empty else None,
                     weather_wind_speed_kph=float(session.weather_data.iloc[-1]['WindSpeed']) if hasattr(session, 'weather_data') and not session.weather_data.empty else None,
                     weather_wind_direction_deg=float(session.weather_data.iloc[-1]['WindDirection']) if hasattr(session, 'weather_data') and not session.weather_data.empty else None,
+                    # Streaming algorithm fields
+                    sensor_quality_score=random.uniform(0.85, 1.0),  # Simulated sensor quality
+                    sequence_number=idx,  # Row index as sequence number
+                    sampling_weight=1.0 / (idx + 1) if idx > 0 else 1.0,  # Reservoir sampling weight
+                    telemetry_hash=hashlib.md5(f"{session_id}_{driver}_{idx}_{lap_time}".encode()).hexdigest(),  # Hash for HyperLogLog
+                    correlation_id=f"{session_id}_{driver}_{lap_number}",  # Link telemetry to lap
                 )
                 
                 batch.append(event)
@@ -351,11 +390,240 @@ def extract_telemetry_events(
         yield batch
 
 
+def detect_overtakes(session: fastf1.core.Session, session_id: str, session_start: datetime) -> Iterable[RaceEvent]:
+    """
+    Detect overtake events by analyzing position changes between laps.
+    
+    An overtake is detected when a driver improves their position from one lap to the next.
+    """
+    laps = session.laps
+    
+    # Group laps by lap number to compare positions
+    for lap_num in sorted(laps['LapNumber'].unique()):
+        current_lap_data = laps[laps['LapNumber'] == lap_num].copy()
+        previous_lap_data = laps[laps['LapNumber'] == lap_num - 1].copy()
+        
+        if previous_lap_data.empty:
+            continue
+        
+        # Create position lookup for previous lap
+        prev_positions = {}
+        for idx, lap in previous_lap_data.iterrows():
+            if pd.notna(lap.get('Position')) and pd.notna(lap.get('Driver')):
+                prev_positions[str(lap['Driver'])] = int(lap['Position'])
+        
+        # Check current lap for position improvements
+        for idx, lap in current_lap_data.iterrows():
+            driver = str(lap['Driver'])
+            curr_pos = lap.get('Position')
+            
+            if pd.isna(curr_pos) or driver not in prev_positions:
+                continue
+            
+            curr_pos = int(curr_pos)
+            prev_pos = prev_positions[driver]
+            
+            # Position improved (lower number = better position)
+            if curr_pos < prev_pos:
+                positions_gained = prev_pos - curr_pos
+                
+                # Find who was overtaken (drivers who lost positions)
+                overtaken_drivers = []
+                for other_driver, other_prev_pos in prev_positions.items():
+                    if other_driver == driver:
+                        continue
+                    
+                    # Check if this driver is now behind
+                    other_current = current_lap_data[current_lap_data['Driver'] == other_driver]
+                    if not other_current.empty:
+                        other_curr_pos = other_current.iloc[0].get('Position')
+                        if pd.notna(other_curr_pos):
+                            other_curr_pos = int(other_curr_pos)
+                            # If they were ahead before and behind now, they were overtaken
+                            if other_prev_pos < prev_pos and other_curr_pos > curr_pos:
+                                overtaken_drivers.append(other_driver)
+                
+                # Create overtake event for each overtaken driver
+                for defender in overtaken_drivers:
+                    lap_time = lap.get('Time')
+                    if pd.isna(lap_time):
+                        continue
+                    
+                    event_time = session_start + lap_time
+                    
+                    # Calculate time gap if telemetry is available
+                    avg_gap_ms = None
+                    delta_time_ms = None
+                    try:
+                        attacker_lap_time = lap.get('LapTime')
+                        defender_lap_row = current_lap_data[current_lap_data['Driver'] == defender]
+                        if not defender_lap_row.empty and pd.notna(attacker_lap_time):
+                            defender_lap_time = defender_lap_row.iloc[0].get('LapTime')
+                            if pd.notna(defender_lap_time):
+                                delta_time_ms = int((defender_lap_time - attacker_lap_time).total_seconds() * 1000)
+                                avg_gap_ms = abs(delta_time_ms)
+                    except Exception:
+                        pass
+                    
+                    event = RaceEvent(
+                        session_id=session_id,
+                        event_id=f"{session_id}_overtake_{driver}_{defender}_{lap_num}",
+                        event_ts_utc=event_time.isoformat(),
+                        event_type="OVERTAKE",
+                        driver_id=driver,
+                        driver_name=get_driver_name(session, driver),
+                        lap_number=int(lap_num),
+                        payload=json.dumps({
+                            'attacker_id': driver,
+                            'defender_id': defender,
+                            'lap_number': int(lap_num),
+                            'lap_count': 1,  # Single overtake event
+                            'avg_gap_ms': avg_gap_ms,
+                            'delta_time_ms': delta_time_ms,
+                            'notes': f"{driver} overtook {defender} on lap {lap_num}"
+                        }),
+                        event_hash=hashlib.md5(f"{session_id}_overtake_{driver}_{defender}_{lap_num}".encode()).hexdigest(),
+                        interaction_strength=3.0,  # High strength for overtakes
+                        community_id=None,
+                        strategic_context=json.dumps({'type': 'overtake', 'positions_gained': positions_gained}),
+                        position_delta=positions_gained,
+                        sector_time_delta_ms=delta_time_ms,
+                    )
+                    yield event
+
+
+def detect_battles(session: fastf1.core.Session, session_id: str, session_start: datetime) -> Iterable[RaceEvent]:
+    """
+    Detect battle events by analyzing drivers who stay close in position over multiple laps.
+    
+    A battle is detected when two drivers swap positions or stay within 1 position for 2+ consecutive laps.
+    """
+    laps = session.laps
+    
+    # Track position battles across laps
+    battles = {}  # (driver_a, driver_b) -> [lap_numbers]
+    
+    for lap_num in sorted(laps['LapNumber'].unique()):
+        current_lap_data = laps[laps['LapNumber'] == lap_num].copy()
+        
+        # Get all drivers and their positions this lap
+        positions = {}
+        for idx, lap in current_lap_data.iterrows():
+            if pd.notna(lap.get('Position')) and pd.notna(lap.get('Driver')):
+                positions[str(lap['Driver'])] = (int(lap['Position']), lap)
+        
+        # Find drivers close to each other (within 1 position)
+        sorted_drivers = sorted(positions.items(), key=lambda x: x[1][0])
+        
+        for i in range(len(sorted_drivers) - 1):
+            driver_a, (pos_a, lap_a) = sorted_drivers[i]
+            driver_b, (pos_b, lap_b) = sorted_drivers[i + 1]
+            
+            # Only consider adjacent positions or swaps
+            if abs(pos_b - pos_a) <= 1:
+                # Create a canonical pair key (alphabetically sorted)
+                pair = tuple(sorted([driver_a, driver_b]))
+                
+                if pair not in battles:
+                    battles[pair] = []
+                battles[pair].append((lap_num, driver_a, driver_b, pos_a, pos_b, lap_a, lap_b))
+    
+    # Generate battle events for pairs that battled for 2+ consecutive laps
+    for (driver_a, driver_b), battle_laps in battles.items():
+        if len(battle_laps) < 2:
+            continue
+        
+        # Check for consecutive laps
+        consecutive_groups = []
+        current_group = [battle_laps[0]]
+        
+        for i in range(1, len(battle_laps)):
+            prev_lap_num = battle_laps[i-1][0]
+            curr_lap_num = battle_laps[i][0]
+            
+            if curr_lap_num == prev_lap_num + 1:
+                current_group.append(battle_laps[i])
+            else:
+                if len(current_group) >= 2:
+                    consecutive_groups.append(current_group)
+                current_group = [battle_laps[i]]
+        
+        if len(current_group) >= 2:
+            consecutive_groups.append(current_group)
+        
+        # Generate battle events for each consecutive group
+        for group in consecutive_groups:
+            first_lap = group[0]
+            last_lap = group[-1]
+            
+            lap_num = first_lap[0]
+            lap_count = len(group)
+            
+            # Use the first lap's data for timing
+            lap_a = first_lap[5]
+            lap_time = lap_a.get('Time')
+            
+            if pd.isna(lap_time):
+                continue
+            
+            event_time = session_start + lap_time
+            
+            # Calculate average gap
+            avg_gap_ms = None
+            delta_time_ms = None
+            try:
+                lap_time_a = lap_a.get('LapTime')
+                lap_b = first_lap[6]
+                lap_time_b = lap_b.get('LapTime')
+                
+                if pd.notna(lap_time_a) and pd.notna(lap_time_b):
+                    delta_time_ms = int((lap_time_b - lap_time_a).total_seconds() * 1000)
+                    avg_gap_ms = abs(delta_time_ms)
+            except Exception:
+                pass
+            
+            event = RaceEvent(
+                session_id=session_id,
+                event_id=f"{session_id}_battle_{driver_a}_{driver_b}_{lap_num}",
+                event_ts_utc=event_time.isoformat(),
+                event_type="BATTLE",
+                driver_id=driver_a,
+                driver_name=get_driver_name(session, driver_a),
+                lap_number=int(lap_num),
+                payload=json.dumps({
+                    'driver_a_id': driver_a,
+                    'driver_b_id': driver_b,
+                    'lap_number': int(lap_num),
+                    'lap_count': lap_count,
+                    'avg_gap_ms': avg_gap_ms,
+                    'delta_time_ms': delta_time_ms,
+                    'battle_type': 'position_battle',
+                    'notes': f"{driver_a} and {driver_b} battled for {lap_count} laps starting at lap {lap_num}"
+                }),
+                event_hash=hashlib.md5(f"{session_id}_battle_{driver_a}_{driver_b}_{lap_num}".encode()).hexdigest(),
+                interaction_strength=2.5,  # High strength for battles
+                community_id=None,
+                strategic_context=json.dumps({'type': 'battle', 'lap_count': lap_count}),
+                position_delta=None,
+                sector_time_delta_ms=delta_time_ms,
+            )
+            yield event
+
+
+def get_driver_name(session: fastf1.core.Session, driver_id: str) -> Optional[str]:
+    """Get driver name from session."""
+    try:
+        driver_info = session.get_driver(driver_id)
+        return str(driver_info.get('Abbreviation', driver_info.get('FullName', driver_id)))
+    except:
+        return driver_id
+
+
 def extract_race_events(session: fastf1.core.Session) -> Iterable[RaceEvent]:
     """
     Extract race events from session data.
     
-    Includes: lap completions, pit stops, and any available race control messages.
+    Includes: lap completions, pit stops, overtakes, and battles.
     """
     session_id = get_session_id(session)
     session_start = get_session_start_time(session)
@@ -368,14 +636,16 @@ def extract_race_events(session: fastf1.core.Session) -> Iterable[RaceEvent]:
             continue
         
         event_time = session_start + lap_time
+        driver_id = str(lap['Driver'])
         
         # Lap completion event
         event = RaceEvent(
             session_id=session_id,
-            event_id=f"{session_id}_lap_{lap['Driver']}_{lap['LapNumber']}",
+            event_id=f"{session_id}_lap_{driver_id}_{lap['LapNumber']}",
             event_ts_utc=event_time.isoformat(),
             event_type="LAP_COMPLETION",
-            driver_id=str(lap['Driver']),
+            driver_id=driver_id,
+            driver_name=get_driver_name(session, driver_id),
             lap_number=int(lap['LapNumber']),
             payload=json.dumps({
                 'lap_time_ms': int(lap['LapTime'].total_seconds() * 1000) if pd.notna(lap['LapTime']) else None,
@@ -386,7 +656,14 @@ def extract_race_events(session: fastf1.core.Session) -> Iterable[RaceEvent]:
                 'tyre_life': int(lap['TyreLife']) if pd.notna(lap.get('TyreLife')) else None,
                 'stint': int(lap['Stint']) if pd.notna(lap.get('Stint')) else None,
                 'fresh_tyre': bool(lap.get('FreshTyre', False)),
-            })
+            }),
+            # Streaming algorithm fields
+            event_hash=hashlib.md5(f"{session_id}_lap_{lap['Driver']}_{lap['LapNumber']}".encode()).hexdigest(),
+            interaction_strength=1.0,  # Default strength
+            community_id=None,  # Will be computed in gold layer
+            strategic_context=None,  # No strategic data for lap completion
+            position_delta=int(lap.get('Position', 0)) if pd.notna(lap.get('Position')) else None,
+            sector_time_delta_ms=None,  # Will be computed in gold layer
         )
         yield event
         
@@ -395,13 +672,15 @@ def extract_race_events(session: fastf1.core.Session) -> Iterable[RaceEvent]:
             pit_in_time = session_start + lap['PitInTime']
             pit_out_time = session_start + lap['PitOutTime'] if pd.notna(lap.get('PitOutTime')) else pit_in_time
             pit_duration_ms = int((pit_out_time - pit_in_time).total_seconds() * 1000)
+            pit_driver_id = str(lap['Driver'])
             
             pit_event = RaceEvent(
                 session_id=session_id,
-                event_id=f"{session_id}_pit_{lap['Driver']}_{lap['LapNumber']}",
+                event_id=f"{session_id}_pit_{pit_driver_id}_{lap['LapNumber']}",
                 event_ts_utc=pit_in_time.isoformat(),
                 event_type="PIT_STOP",
-                driver_id=str(lap['Driver']),
+                driver_id=pit_driver_id,
+                driver_name=get_driver_name(session, pit_driver_id),
                 lap_number=int(lap['LapNumber']),
                 pit_stop_id=f"pit_{lap['Driver']}_{lap['Stint']}",
                 pit_duration_ms=pit_duration_ms,
@@ -409,9 +688,32 @@ def extract_race_events(session: fastf1.core.Session) -> Iterable[RaceEvent]:
                     'compound_before': str(lap.get('Compound', '')),
                     'pit_in_time': pit_in_time.isoformat(),
                     'pit_out_time': pit_out_time.isoformat(),
-                })
+                }),
+                # Streaming algorithm fields
+                event_hash=hashlib.md5(f"{session_id}_pit_{lap['Driver']}_{lap['LapNumber']}".encode()).hexdigest(),
+                interaction_strength=2.0,  # Higher strength for pit events (strategic importance)
+                community_id=None,
+                strategic_context=json.dumps({'type': 'pit_stop', 'duration_ms': pit_duration_ms}),
+                position_delta=None,
+                sector_time_delta_ms=None,
             )
             yield pit_event
+    
+    # Extract overtake events
+    logger.info(f"Detecting overtakes for {session_id}")
+    overtake_count = 0
+    for event in detect_overtakes(session, session_id, session_start):
+        overtake_count += 1
+        yield event
+    logger.info(f"Detected {overtake_count} overtake events")
+    
+    # Extract battle events
+    logger.info(f"Detecting battles for {session_id}")
+    battle_count = 0
+    for event in detect_battles(session, session_id, session_start):
+        battle_count += 1
+        yield event
+    logger.info(f"Detected {battle_count} battle events")
 
 
 def create_kafka_producer(bootstrap_servers: str) -> KafkaProducer:
@@ -480,9 +782,9 @@ def process_session(
         
         # Publish telemetry
         if not args.skip_telemetry:
-            logger.info(f"Extracting telemetry from {session_id}")
+            logger.info(f"Extracting telemetry from {session_id} (sample rate: 1/{args.telemetry_sample_rate})")
             batch_count = 0
-            for batch in extract_telemetry_events(session, args.driver, args.batch_size):
+            for batch in extract_telemetry_events(session, args.driver, args.batch_size, args.telemetry_sample_rate):
                 if args.dry_run:
                     if stats['telemetry'] == 0:  # Print first event as sample
                         logger.info(f"Sample telemetry event: {json.dumps(asdict(batch[0]), indent=2, default=str)}")

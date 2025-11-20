@@ -1,28 +1,20 @@
 # Spark Streaming Jobs
 
-Two Structured Streaming jobs for the **Bronze → Gold** pipeline:
+Bronze → Gold pipeline:
 
 | Stage  | Script               | Purpose                                                                 |
 |--------|----------------------|-------------------------------------------------------------------------|
 | Bronze | `bronze_stream.py`   | Kafka → S3 Delta: Ingest telemetry & race events from MSK topics|
-| Gold   | `gold_stream.py`     | S3 → Neo4j: Read Bronze Delta, derive graph nodes/edges, write to Neo4j + Kafka|
+| Gold   | `gold_stream.py`     | S3 → Neo4j: Read Bronze Delta, derive graph nodes/edges, write to Neo4j|
 
-## Quick Start
+## Setup
 
-### 1. Setup (one-time)
 ```bash
-# From repo root
 ./scripts/setup_all.sh
 ```
 
-This packages Spark code, uploads to S3, and creates `spark/emr_job.env` with all connection details.
+## Start Bronze Stream
 
-### 2. SSH to EMR
-```bash
-ssh -i ~/.ssh/id_rsa hadoop@<EMR_MASTER_DNS>
-```
-
-### 3. Start Bronze Stream (Kafka → S3)
 ```bash
 source spark.env && nohup spark-submit \
   --master yarn \
@@ -45,7 +37,8 @@ source spark.env && nohup spark-submit \
   > bronze_stream.log 2>&1 &
 ```
 
-### 4. Start Gold Stream (S3 → Neo4j)
+## Start Gold Stream
+
 ```bash
 source spark.env && nohup spark-submit \
   --master yarn \
@@ -70,37 +63,19 @@ source spark.env && nohup spark-submit \
   > gold_stream.log 2>&1 &
 ```
 
-### 5. Monitor
+## Monitor
+
 ```bash
-# Check logs
 tail -f bronze_stream.log
 tail -f gold_stream.log
-
-# Check YARN applications
 yarn application -list
-
-# Kill jobs
-yarn application -kill <application_id>
 ```
 
-## Package & Deploy Updates
+## Package & Deploy
 
 ```bash
 cd spark
-make package                                    # Creates dist/spark_package.zip
-aws s3 cp dist/spark_package.zip s3://<bucket>/spark/
-aws s3 cp bronze_stream.py s3://<bucket>/spark/
-aws s3 cp gold_stream.py s3://<bucket>/spark/
-```
-
-## Key Environment Variables (in spark.env)
-
-```bash
-KAFKA_BOOTSTRAP=b-1.msk.amazonaws.com:9092,...
-BRONZE_PATH=s3://bucket/bronze
-CHECKPOINT_PATH=s3://bucket/checkpoints
-NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=<password>
-SPARK_WRITE_TO_NEO4J=true
+make package
+export S3_PREFIX=s3://$(terraform -chdir=../infra output -raw s3_artifacts_bucket)/spark
+make upload
 ```

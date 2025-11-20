@@ -16,71 +16,6 @@
     retention.ms: 604800000
     min.insync.replicas: 2 
 
-# Graph-focused topics consumed by MSK Connect / Neo4j sink.
-- name: graph.neo4j.driver_nodes
-  partitions: 3
-  replication_factor: 3
-  config:
-    cleanup.policy: compact
-    min.cleanable.dirty.ratio: 0.1
-    delete.retention.ms: 86400000
-
-- name: graph.neo4j.session_nodes
-  partitions: 3
-  replication_factor: 3
-  config:
-    cleanup.policy: compact
-    min.cleanable.dirty.ratio: 0.1
-    delete.retention.ms: 86400000
-
-- name: graph.neo4j.team_nodes
-  partitions: 3
-  replication_factor: 3
-  config:
-    cleanup.policy: compact
-    min.cleanable.dirty.ratio: 0.1
-    delete.retention.ms: 86400000
-
-- name: graph.neo4j.lap_nodes
-  partitions: 6
-  replication_factor: 3
-  config:
-    cleanup.policy: compact
-    min.cleanable.dirty.ratio: 0.1
-    delete.retention.ms: 86400000
-
-- name: graph.neo4j.driver_session_edges
-  partitions: 3
-  replication_factor: 3
-  config:
-    cleanup.policy: compact
-    min.cleanable.dirty.ratio: 0.1
-    delete.retention.ms: 86400000
-
-- name: graph.neo4j.lap_completed_edges
-  partitions: 6
-  replication_factor: 3
-  config:
-    cleanup.policy: compact
-    min.cleanable.dirty.ratio: 0.1
-    delete.retention.ms: 86400000
-
-- name: graph.neo4j.overtake_edges
-  partitions: 6
-  replication_factor: 3
-  config:
-    cleanup.policy: delete
-    retention.ms: 1209600000
-    min.insync.replicas: 2
-
-- name: graph.neo4j.battle_edges
-  partitions: 6
-  replication_factor: 3
-  config:
-    cleanup.policy: delete
-    retention.ms: 1209600000
-    min.insync.replicas: 2
-
 - name: dlq.neo4j
   partitions: 3
   replication_factor: 3
@@ -88,3 +23,24 @@
     cleanup.policy: delete
     retention.ms: 259200000
     min.insync.replicas: 2
+
+# Optional: Future streaming analytics topics (not currently used)
+# Uncomment if you need intermediate processing stages
+#
+# - name: telemetry.sampled
+#   partitions: 3
+#   replication_factor: 3
+#   config:
+#     cleanup.policy: delete
+#     retention.ms: 604800000
+#     min.insync.replicas: 2
+#     compression.type: gzip
+#
+# - name: events.deduplicated
+#   partitions: 3
+#   replication_factor: 3
+#   config:
+#     cleanup.policy: compact
+#     min.cleanable.dirty.ratio: 0.1
+#     delete.retention.ms: 86400000
+

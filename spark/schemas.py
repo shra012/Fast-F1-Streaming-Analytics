@@ -12,11 +12,11 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-# Base telemetry payload emitted by the producer.
 TELEMETRY_SCHEMA = StructType(
     [
         StructField("session_id", StringType(), False),
         StructField("driver_id", StringType(), False),
+        StructField("driver_name", StringType(), True),
         StructField("car_number", StringType(), True),
         StructField("lap_number", IntegerType(), True),
         StructField("micro_sector_id", IntegerType(), True),
@@ -48,10 +48,14 @@ TELEMETRY_SCHEMA = StructType(
         StructField("weather_wind_direction_deg", FloatType(), True),
         StructField("source", StringType(), True),
         StructField("ingest_id", StringType(), True),
+        StructField("sensor_quality_score", FloatType(), True),
+        StructField("sequence_number", LongType(), True),
+        StructField("sampling_weight", FloatType(), True),
+        StructField("telemetry_hash", StringType(), True),
+        StructField("correlation_id", StringType(), True),
     ]
 )
 
-# Race control and pit-stop events.
 RACE_EVENT_SCHEMA = StructType(
     [
         StructField("session_id", StringType(), False),
@@ -59,6 +63,7 @@ RACE_EVENT_SCHEMA = StructType(
         StructField("event_ts_utc", StringType(), False),
         StructField("event_type", StringType(), False),
         StructField("driver_id", StringType(), True),
+        StructField("driver_name", StringType(), True),
         StructField("lap_number", IntegerType(), True),
         StructField("pit_stop_id", StringType(), True),
         StructField("pit_duration_ms", LongType(), True),
@@ -66,10 +71,15 @@ RACE_EVENT_SCHEMA = StructType(
         StructField("safety_car_state", StringType(), True),
         StructField("payload", StringType(), True),
         StructField("source", StringType(), True),
+        StructField("event_hash", StringType(), True),
+        StructField("interaction_strength", FloatType(), True),
+        StructField("community_id", StringType(), True),
+        StructField("strategic_context", StringType(), True),
+        StructField("position_delta", IntegerType(), True),
+        StructField("sector_time_delta_ms", LongType(), True),
     ]
 )
 
-# Enriched lap-level metrics flowing into the gold/platinum stages.
 LAP_METRICS_SCHEMA = StructType(
     [
         StructField("session_id", StringType(), False),

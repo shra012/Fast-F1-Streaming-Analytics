@@ -43,7 +43,6 @@ def _load_env() -> None:
             _ENV_LOADED = True
             return
 
-    # Fall back to default search if nothing matched.
     load_dotenv()
     _ENV_LOADED = True
 

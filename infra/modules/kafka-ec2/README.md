@@ -61,7 +61,7 @@ Connect using bootstrap servers: `<ip1>:9092,<ip2>:9094,<ip3>:9096`
 
 ## Security
 
-⚠️ **Warning**: This module creates security groups that allow ALL inbound traffic (0.0.0.0/0). This is suitable for development/testing but should be restricted for production use.
+**Warning**: This module creates security groups that allow ALL inbound traffic (0.0.0.0/0). This is suitable for development/testing but should be restricted for production use.
 
 ## Ports
 

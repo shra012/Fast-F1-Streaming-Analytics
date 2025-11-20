@@ -14,8 +14,8 @@ from typing import Dict, Tuple
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col, current_timestamp, from_json, lit
 
-from spark.schemas import RACE_EVENT_SCHEMA, TELEMETRY_SCHEMA
-from spark.utils import add_common_kafka_options, create_spark_session, option_dict
+from schemas import RACE_EVENT_SCHEMA, TELEMETRY_SCHEMA
+from utils import add_common_kafka_options, create_spark_session, option_dict
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,15 +92,13 @@ def read_kafka_topic(
     # Parse JSON and extract fields
     with_payload = raw_df.withColumn("payload", from_json(col("kafka_value"), schema))
     
-    # For debugging: create a view to check parsing
     parsed_df = (
         with_payload
         .select("payload.*", "kafka_key", "topic", "partition", "offset", "kafka_timestamp", "ingested_at")
         .withColumn("bronze_topic", lit(topic))
     )
     
-    # Don't filter out NULLs yet - let's see what we get
-    # .filter(col("session_id").isNotNull())
+    print(f"Parsed {topic} data")
 
     return parsed_df, raw_df
 
