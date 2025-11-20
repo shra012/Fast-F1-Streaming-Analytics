@@ -71,7 +71,7 @@ execute_query \
 
 # Query 3: Driver statistics
 execute_query \
-    "MATCH (d:Driver) RETURN d.driverId, d.avgSpeedKph, d.maxSpeedKph, d.maxLapSeen ORDER BY d.maxSpeedKph DESC LIMIT 10;" \
+    "MATCH (d:Driver) WHERE d.maxSpeedKph IS NOT NULL RETURN d.driverId, d.driverName, d.avgSpeedKph, d.maxSpeedKph, d.maxLapSeen ORDER BY d.maxSpeedKph DESC LIMIT 10;" \
     "3. Top 10 Drivers by Max Speed"
 
 # Query 4: Session overview
@@ -81,32 +81,32 @@ execute_query \
 
 # Query 5: Lap statistics per driver
 execute_query \
-    "MATCH (l:Lap)-[:COMPLETED_BY]->(d:Driver) RETURN d.driverId, count(l) AS lap_count, avg(l.avgSpeedKph) AS avg_lap_speed, max(l.maxSpeedKph) AS fastest_speed ORDER BY lap_count DESC LIMIT 10;" \
+    "MATCH (l:Lap)-[:COMPLETED_BY]->(d:Driver) RETURN d.driverId, d.driverName, count(l) AS lap_count, avg(l.avgSpeedKph) AS avg_lap_speed, max(l.maxSpeedKph) AS fastest_speed ORDER BY lap_count DESC LIMIT 10;" \
     "5. Lap Statistics per Driver"
 
 # Query 6: Driver-Session relationships
 execute_query \
-    "MATCH (d:Driver)-[r:DROVE_IN]->(s:Session) RETURN d.driverId, s.sessionId, r.firstLap, r.lastLap, r.firstEventTs ORDER BY r.lastEventTs DESC LIMIT 10;" \
+    "MATCH (d:Driver)-[r:DROVE_IN]->(s:Session) RETURN d.driverId, d.driverName, s.sessionId, r.firstLap, r.lastLap, r.firstEventTs ORDER BY r.lastEventTs DESC LIMIT 10;" \
     "6. Driver-Session Relationships"
 
 # Query 7: Fastest laps
 execute_query \
-    "MATCH (l:Lap) WHERE l.avgSpeedKph IS NOT NULL RETURN l.lapId, l.driverId, l.lapNumber, l.avgSpeedKph, l.maxSpeedKph ORDER BY l.maxSpeedKph DESC LIMIT 10;" \
+    "MATCH (l:Lap)-[:COMPLETED_BY]->(d:Driver) WHERE l.avgSpeedKph IS NOT NULL RETURN l.lapId, d.driverId, d.driverName, l.lapNumber, l.avgSpeedKph, l.maxSpeedKph ORDER BY l.maxSpeedKph DESC LIMIT 10;" \
     "7. Top 10 Fastest Laps"
 
 # Query 8: Overtake interactions (if they exist)
 execute_query \
-    "MATCH (attacker:Driver)-[r:OVERTAKE]->(defender:Driver) RETURN attacker.driverId AS attacker, defender.driverId AS defender, r.sessionId, r.lapNumber, r.eventTs ORDER BY r.eventTs DESC LIMIT 10;" \
+    "MATCH (attacker:Driver)-[r:OVERTAKE]->(defender:Driver) RETURN attacker.driverId AS attacker_id, attacker.driverName AS attacker, defender.driverId AS defender_id, defender.driverName AS defender, r.sessionId, r.lapNumber, r.eventTs ORDER BY r.eventTs DESC LIMIT 10;" \
     "8. Recent Overtake Interactions" || echo "No OVERTAKE relationships found (expected if gold stream not yet processing events)"
 
 # Query 9: Battle interactions (if they exist)
 execute_query \
-    "MATCH (attacker:Driver)-[r:BATTLE]->(defender:Driver) RETURN attacker.driverId AS attacker, defender.driverId AS defender, r.sessionId, r.lapNumber, r.lapCount ORDER BY r.lapCount DESC LIMIT 10;" \
+    "MATCH (attacker:Driver)-[r:BATTLE]->(defender:Driver) RETURN attacker.driverId AS attacker_id, attacker.driverName AS attacker, defender.driverId AS defender_id, defender.driverName AS defender, r.sessionId, r.lapNumber, r.lapCount ORDER BY r.lapCount DESC LIMIT 10;" \
     "9. Top Battle Interactions" || echo "No BATTLE relationships found (expected if gold stream not yet processing events)"
 
 # Query 10: Interaction summary
 execute_query \
-    "MATCH (d1:Driver)-[r:OVERTAKE|BATTLE]->(d2:Driver) RETURN d1.driverId AS driver1, type(r) AS interaction_type, d2.driverId AS driver2, count(r) AS occurrences ORDER BY occurrences DESC LIMIT 20;" \
+    "MATCH (d1:Driver)-[r:OVERTAKE|BATTLE]->(d2:Driver) RETURN d1.driverId AS driver1_id, d1.driverName AS driver1, type(r) AS interaction_type, d2.driverId AS driver2_id, d2.driverName AS driver2, count(r) AS occurrences ORDER BY occurrences DESC LIMIT 20;" \
     "10. Interaction Summary (OVERTAKE + BATTLE)" || echo "No interaction relationships found yet"
 
 # Query 11: Graph statistics
@@ -142,7 +142,4 @@ echo "- Queries 3-7 test basic node and relationship data"
 echo "- Queries 8-10 test interaction relationships (OVERTAKE/BATTLE)"
 echo "- Query 11 provides comprehensive graph statistics"
 echo "- Query 12 shows sample data from each node type"
-echo ""
-echo "If OVERTAKE/BATTLE queries return empty, restart gold_stream job"
-echo "to apply the latest code with interaction relationship writes."
 echo ""

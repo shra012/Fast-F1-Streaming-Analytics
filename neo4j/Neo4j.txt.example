@@ -4,4 +4,4 @@ NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<neo4j-password>
 NEO4J_DATABASE=neo4j
 AURA_INSTANCEID=<aura-instance-id>
-AURA_INSTANCENAME=<aura-instance-name>
+AURA_INSTANCENAME=<aura-instance>

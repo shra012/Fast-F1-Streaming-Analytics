@@ -13,7 +13,7 @@ $(DIST_DIR):
 	mkdir -p $(DIST_DIR)
 
 package: $(DIST_DIR)
-	cd .. && zip -qr spark/$(PACKAGE_ZIP) spark -x 'spark/dist/*' 'spark/__pycache__/*' 'spark/*.pyc'
+	cd . && zip -qr $(PACKAGE_ZIP) *.py -x '__pycache__/*' '*.pyc'
 	@echo "Created $(PACKAGE_ZIP)"
 
 upload: package

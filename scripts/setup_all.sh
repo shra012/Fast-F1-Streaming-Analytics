@@ -12,12 +12,15 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 INFRA_DIR="${REPO_ROOT}/infra"
 KAFKA_DIR="${REPO_ROOT}/kafka"
 SPARK_DIR="${REPO_ROOT}/spark"
+NEO4J_DIR="${REPO_ROOT}/neo4j"
 PRODUCER_DIR="${KAFKA_DIR}/producer"
 CREATE_TOPICS_SRC="${KAFKA_DIR}/scripts/create_topics.py"
 TOPICS_FILE_SRC="${KAFKA_DIR}/topics.yaml"
 REQUIREMENTS_FILE="${KAFKA_DIR}/requirements.txt"
 BOOTSTRAP_DIR="${PRODUCER_DIR}/emr_bootstrap"
 ENV_FILE="${SPARK_DIR}/emr_job.env"
+STATUS_CHECK_SCRIPT="${SCRIPT_DIR}/check_pipeline_status.sh"
+STATUS_CHECK_BASENAME="$(basename "${STATUS_CHECK_SCRIPT}")"
 SSH_KEY="${LOCAL_SSH_KEY:-${HOME}/.ssh/id_rsa}"
 
 # Colors for output
@@ -134,7 +137,7 @@ NEO4J_USERNAME="neo4j"
 NEO4J_PASSWORD=""
 NEO4J_DATABASE="neo4j"
 
-NEO4J_FILE="${REPO_ROOT}/neo4j/Neo4j.txt"
+NEO4J_FILE="${NEO4J_DIR}/Neo4j.txt"
 if [[ -f "${NEO4J_FILE}" ]]; then
   log_info "Loading Neo4j credentials from ${NEO4J_FILE}..."
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -154,7 +157,7 @@ if [[ -f "${NEO4J_FILE}" ]]; then
   done < "${NEO4J_FILE}"
   
   if [[ -n "${NEO4J_URI}" && -n "${NEO4J_PASSWORD}" ]]; then
-    log_info "✓ Neo4j credentials loaded successfully"
+    log_info "Neo4j credentials loaded successfully"
   else
     log_warn "Neo4j credentials incomplete in ${NEO4J_FILE}. Skipping Neo4j environment variables."
     NEO4J_URI=""
@@ -200,6 +203,21 @@ prepare_bootstrap_payload
 
 log_info "Copying producer to EMR master..."
 scp -i "${SSH_KEY}" -r "${PRODUCER_DIR}" "hadoop@${EMR_MASTER_DNS}:~/"
+
+if [[ -d "${NEO4J_DIR}" ]]; then
+  log_info "Copying Neo4j assets to EMR master..."
+  scp -i "${SSH_KEY}" -r "${NEO4J_DIR}" "hadoop@${EMR_MASTER_DNS}:~/"
+else
+  log_warn "Neo4j directory not found at ${NEO4J_DIR}. Skipping copy."
+fi
+
+if [[ -f "${STATUS_CHECK_SCRIPT}" ]]; then
+  log_info "Copying pipeline status checker to EMR master..."
+  scp -i "${SSH_KEY}" "${STATUS_CHECK_SCRIPT}" "hadoop@${EMR_MASTER_DNS}:~/"
+  ssh -i "${SSH_KEY}" "hadoop@${EMR_MASTER_DNS}" "chmod +x ~/${STATUS_CHECK_BASENAME}"
+else
+  log_warn "Pipeline status script not found at ${STATUS_CHECK_SCRIPT}. Skipping copy."
+fi
 
 # ============================================================================
 # STEP 4: Setup Python venv, install dependencies, create topics, install Kafka tools
@@ -366,14 +384,15 @@ echo "========================================================================"
 echo
 log_info "Next steps:"
 echo
-echo "1. Run the producer on EMR:"
+echo "1. Run the producer on EMR (2020-2024 historical data):"
 echo "   ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS}"
 echo "   ~/producer/.venv/bin/python ~/producer/producer.py \\"
-echo "     --bootstrap ${KAFKA_BOOTSTRAP} \\"
-echo "     --start-year 2024 \\"
-echo "     --event Bahrain \\"
+echo "     --bootstrap \${KAFKA_BOOTSTRAP} \\"
+echo "     --start-year 2020 \\"
 echo "     --session R \\"
-echo "     --speedup 50"
+echo "     --speedup 100 \\"
+echo "     --telemetry-sample-rate 100 \\"
+echo "     --batch-size 500"
 echo
 echo "2. Start the Bronze streaming job:"
 echo "   ssh -i ${SSH_KEY} hadoop@${EMR_MASTER_DNS}"
@@ -417,6 +436,12 @@ echo "     --neo4j-username \"\${NEO4J_USERNAME}\" \\"
 echo "     --neo4j-password \"\${NEO4J_PASSWORD}\" \\"
 echo "     --neo4j-database \"\${NEO4J_DATABASE}\" \\"
 echo "     --write-to-neo4j"
+echo "   # Optional: Enable streaming algorithms (uncomment to enable)"
+echo "   #     --enable-hyperloglog \\"
+echo "   #     --enable-sampling \\"
+echo "   #     --enable-pagerank \\"
+echo "   #     --enable-communities \\"
+echo "   #     --sample-size 1000"
 echo "   # Note: Neo4j credentials are loaded from ~/spark.env (sourced from emr_job.env)"
 echo "   # If Neo4j credentials are not set, remove --write-to-neo4j flag"
 echo "   # Add --kafka-sink-option entries for IAM/TLS if needed (see docs/kafka-connect-plan.md)."

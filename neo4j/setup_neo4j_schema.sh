@@ -95,6 +95,21 @@ execute_cypher \
     "CREATE CONSTRAINT lap_id_unique IF NOT EXISTS FOR (l:Lap) REQUIRE l.lapId IS UNIQUE;" \
     "Lap node uniqueness constraint"
 
+# Interaction aggregation nodes
+execute_cypher \
+    "CREATE CONSTRAINT interaction_id_unique IF NOT EXISTS FOR (i:Interaction) REQUIRE i.interactionId IS UNIQUE;" \
+    "Interaction node uniqueness constraint"
+
+# Sector comparison nodes
+execute_cypher \
+    "CREATE CONSTRAINT sector_comp_id_unique IF NOT EXISTS FOR (sc:SectorComparison) REQUIRE sc.sectorCompId IS UNIQUE;" \
+    "SectorComparison node uniqueness constraint"
+
+# Community nodes
+execute_cypher \
+    "CREATE CONSTRAINT community_id_unique IF NOT EXISTS FOR (c:Community) REQUIRE c.communityId IS UNIQUE;" \
+    "Community node uniqueness constraint"
+
 # ==========================================
 # Create Indexes (for performance)
 # ==========================================
@@ -120,6 +135,19 @@ execute_cypher \
 execute_cypher \
     "CREATE INDEX driver_max_speed_idx IF NOT EXISTS FOR (d:Driver) ON (d.maxSpeedKph);" \
     "Driver maxSpeedKph index"
+
+# Driver analytics indexes (streaming algorithms)
+execute_cypher \
+    "CREATE INDEX driver_pagerank_idx IF NOT EXISTS FOR (d:Driver) ON (d.pagerankScore);" \
+    "Driver PageRank score index"
+
+execute_cypher \
+    "CREATE INDEX driver_community_idx IF NOT EXISTS FOR (d:Driver) ON (d.communityId);" \
+    "Driver community ID index"
+
+execute_cypher \
+    "CREATE INDEX driver_hll_interactions_idx IF NOT EXISTS FOR (d:Driver) ON (d.uniqueInteractionCount);" \
+    "Driver HyperLogLog interaction count index"
 
 # Indexes on Session properties
 execute_cypher \
@@ -162,6 +190,37 @@ execute_cypher \
 execute_cypher \
     "CREATE INDEX lap_last_event_idx IF NOT EXISTS FOR (l:Lap) ON (l.lastEventTs);" \
     "Lap lastEventTs index"
+
+# Indexes on Interaction nodes
+execute_cypher \
+    "CREATE INDEX interaction_session_idx IF NOT EXISTS FOR (i:Interaction) ON (i.sessionId);" \
+    "Interaction sessionId index"
+
+execute_cypher \
+    "CREATE INDEX interaction_strength_idx IF NOT EXISTS FOR (i:Interaction) ON (i.avgStrength);" \
+    "Interaction avgStrength index"
+
+execute_cypher \
+    "CREATE INDEX interaction_hll_count_idx IF NOT EXISTS FOR (i:Interaction) ON (i.uniqueInteractionCount);" \
+    "Interaction HyperLogLog count index"
+
+# Indexes on SectorComparison nodes
+execute_cypher \
+    "CREATE INDEX sector_comp_driver_idx IF NOT EXISTS FOR (sc:SectorComparison) ON (sc.driverId);" \
+    "SectorComparison driverId index"
+
+execute_cypher \
+    "CREATE INDEX sector_comp_session_idx IF NOT EXISTS FOR (sc:SectorComparison) ON (sc.sessionId);" \
+    "SectorComparison sessionId index"
+
+execute_cypher \
+    "CREATE INDEX sector_comp_delta_idx IF NOT EXISTS FOR (sc:SectorComparison) ON (sc.avgDelta);" \
+    "SectorComparison avgDelta index"
+
+# Indexes on Community nodes
+execute_cypher \
+    "CREATE INDEX community_member_count_idx IF NOT EXISTS FOR (c:Community) ON (c.memberCount);" \
+    "Community memberCount index"
 
 # Indexes on Relationships
 execute_cypher \
@@ -226,19 +285,28 @@ execute_cypher \
     "CREATE INDEX battle_event_idx IF NOT EXISTS FOR ()-[r:BATTLE]-() ON (r.eventId);" \
     "BATTLE relationship eventId index"
 
+# Advanced streaming algorithm relationships
+execute_cypher \
+    "CREATE INDEX influenced_by_weight_idx IF NOT EXISTS FOR ()-[r:INFLUENCED_BY]-() ON (r.influenceWeight);" \
+    "INFLUENCED_BY relationship PageRank weight index"
+
+execute_cypher \
+    "CREATE INDEX influenced_by_session_idx IF NOT EXISTS FOR ()-[r:INFLUENCED_BY]-() ON (r.sessionId);" \
+    "INFLUENCED_BY relationship sessionId index"
+
+execute_cypher \
+    "CREATE INDEX same_community_idx IF NOT EXISTS FOR ()-[r:SAME_COMMUNITY]-() ON (r.communityId);" \
+    "SAME_COMMUNITY relationship LSH communityId index"
+
+execute_cypher \
+    "CREATE INDEX faster_than_delta_idx IF NOT EXISTS FOR ()-[r:FASTER_THAN]-() ON (r.timeDeltaMs);" \
+    "FASTER_THAN relationship time delta index"
+
+execute_cypher \
+    "CREATE INDEX faster_than_session_idx IF NOT EXISTS FOR ()-[r:FASTER_THAN]-() ON (r.sessionId);" \
+    "FASTER_THAN relationship sessionId index"
+
 # ==========================================
-
-execute_cypher \
-    "CREATE INDEX overtake_lap_idx IF NOT EXISTS FOR ()-[r:OVERTAKE]-() ON (r.lap_number);" \
-    "OVERTAKE relationship lap_number index"
-
-execute_cypher \
-    "CREATE INDEX battle_session_idx IF NOT EXISTS FOR ()-[r:BATTLE]-() ON (r.session_id);" \
-    "BATTLE relationship session_id index"
-
-execute_cypher \
-    "CREATE INDEX battle_lap_idx IF NOT EXISTS FOR ()-[r:BATTLE]-() ON (r.lap_number);" \
-    "BATTLE relationship lap_number index"
 
 # ==========================================
 # Verify Schema
@@ -264,8 +332,7 @@ echo "=========================================="
 echo ""
 echo "Next steps:"
 echo "1. Verify constraints and indexes were created"
-echo "2. Start the Kafka Connect sink connector"
-echo "3. Monitor data ingestion in Neo4j Browser"
+echo "2. Monitor data ingestion in Neo4j Browser"
 echo ""
 echo "Connect to Neo4j Browser:"
 echo "  ${NEO4J_URI}"
